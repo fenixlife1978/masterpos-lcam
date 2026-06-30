@@ -7,7 +7,7 @@ export interface Product {
   id: number;
   barcode?: string;
   name: string;
-  category: Category; // ✅ Cambiado: ahora es Category, no string
+  category: Category;
   department?: string;
   stock: number;
   minStock?: number;
@@ -29,6 +29,9 @@ export interface Product {
   createdAt?: string;
   updatedAt?: string;
   unitMeasure?: string;
+  brand?: string;
+  partNumber?: string;
+  isService?: boolean;
 }
 
 export interface KitComponent {
@@ -303,7 +306,6 @@ export interface GlobalSettings {
   updatedAt?: string;
 }
 
-// ✅ Category como objeto
 export interface Category {
   id: string;
   name: string;
@@ -318,7 +320,6 @@ export interface AdminCode {
   updatedAt?: string;
 }
 
-// ✅ EXPENSES - Categorías de gastos
 export const EXPENSE_CATEGORIES = [
   { value: 'servicios', label: 'Servicios Públicos' },
   { value: 'alquiler', label: 'Alquiler' },
@@ -349,7 +350,6 @@ export interface Expense {
   updatedAt?: string;
 }
 
-// ✅ INCOME - Categorías de ingresos
 export const INCOME_CATEGORIES = [
   { value: 'ventas', label: 'Ventas' },
   { value: 'servicios', label: 'Servicios' },
@@ -374,7 +374,6 @@ export interface Income {
 
 export type PaymentMethod = 'efectivo_bs' | 'usd_efectivo' | 'tarjeta' | 'biopago' | 'pago_movil' | 'zelle' | 'transferencia' | 'cheque' | 'credito';
 
-// ✅ Categorías predefinidas para productos
 export const DEFAULT_CATEGORIES: Category[] = [
   { id: 'alimentos', name: 'Alimentos' },
   { id: 'bebidas', name: 'Bebidas' },
@@ -387,19 +386,16 @@ export const DEFAULT_CATEGORIES: Category[] = [
   { id: 'otros', name: 'Otros' },
 ];
 
-// ✅ Función helper para obtener Category desde string
 export function getCategoryById(id: string): Category {
   const found = DEFAULT_CATEGORIES.find(c => c.id === id);
   return found || DEFAULT_CATEGORIES[DEFAULT_CATEGORIES.length - 1];
 }
 
-// ✅ Función helper para obtener string desde Category
 export function getCategoryId(category: Category | string): string {
   if (typeof category === 'string') return category;
   return category.id;
 }
 
-// ✅ Función helper para obtener nombre de Category
 export function getCategoryName(category: Category | string): string {
   if (typeof category === 'string') {
     const found = DEFAULT_CATEGORIES.find(c => c.id === category);

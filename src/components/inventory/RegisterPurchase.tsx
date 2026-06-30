@@ -4,7 +4,7 @@ import { useState, useMemo, useRef, useEffect } from 'react';
 import { usePOSState } from '@/hooks/use-pos-state';
 import { useSuppliers } from '@/hooks/use-suppliers';
 import { useToast } from '@/hooks/use-toast';
-import { Search, Plus, Trash2, Package, Truck, Receipt, DollarSign, Loader2, Save, CalendarDays, HandCoins, X, PlusCircle, Percent } from 'lucide-react';
+import { Search, Plus, Trash2, Package, Truck, Receipt, DollarSign, Loader2, Save, CalendarDays, HandCoins, X, PlusCircle, Percent, Wrench, Tag } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from '@/components/ui/table';
@@ -30,17 +30,23 @@ const roundTo2 = (num: number): number => Math.round(num * 100) / 100;
 const roundTo4 = (num: number): number => Math.round(num * 10000) / 10000;
 
 const DEFAULT_CATEGORIES: Category[] = [
-  { id: 'Whisky', name: 'Whisky' },
-  { id: 'Ron', name: 'Ron' },
-  { id: 'Cerveza', name: 'Cerveza' },
-  { id: 'Vino', name: 'Vino' },
-  { id: 'Vodka', name: 'Vodka' },
-  { id: 'Tequila', name: 'Tequila' },
-  { id: 'Licor', name: 'Licor' },
-  { id: 'Gin', name: 'Gin' },
+  { id: 'lubricantes', name: 'Lubricantes' },
+  { id: 'repuestos', name: 'Repuestos Automotrices' },
+  { id: 'partes_electricas', name: 'Partes Eléctricas' },
+  { id: 'servicio', name: 'Servicio Automotriz' },
+  { id: 'filtros', name: 'Filtros' },
   { id: 'Otro', name: 'Otro' }
 ];
-const DEFAULT_DEPARTMENTS = ['Polar', 'Munchy', 'Otros'];
+const DEFAULT_DEPARTMENTS = ['Lubricantes', 'Motor', 'Frenos', 'Suspensión', 'Electricidad', 'Servicios', 'Otros'];
+
+const INITIAL_UNITS = [
+  "Unid", "Lts", "gms", "mm", "galon", "Caja", "Docena", "Kit", 
+  "Juego", "Empaque", "Pote", "Paila", "Pieza(s)", "Metro", "cmts", "otro"
+];
+
+const INITIAL_SERVICES = [
+  "Autolavado", "Aspirado", "Cambio de Aceite", "Limpieza de Inyectores", "Escaneo", "Mecánica Ligera"
+];
 
 function getVenezuelaISOString(): string {
   const formatter = new Intl.DateTimeFormat('sv-SE', {
@@ -124,8 +130,14 @@ export default function RegisterPurchase() {
     costUsd: 0,
     priceWholesale: 0,
     priceCost: 0,
-    unitMeasure: ''
+    unitMeasure: 'Unid'
   });
+  const [isService, setIsService] = useState(false);
+  const [units, setUnits] = useState<string[]>(INITIAL_UNITS);
+  const [brands, setBrands] = useState<string[]>(['Genérico']);
+  const [serviceTypes, setServiceTypes] = useState<string[]>(INITIAL_SERVICES);
+  const [brand, setBrand] = useState('Genérico');
+  const [partNumber, setPartNumber] = useState('');
   const [costUsdInput, setCostUsdInput] = useState('');
   const [priceWholesaleInput, setPriceWholesaleInput] = useState('');
   const [priceCostInput, setPriceCostInput] = useState('');
@@ -457,11 +469,30 @@ export default function RegisterPurchase() {
     setKitComponents(prev => prev.filter(c => c.productId !== productId));
   };
 
+  // Helpers para listas dinámicas
+  const handleAddListItem = (setter: React.Dispatch<React.SetStateAction<string[]>>, currentList: string[], promptMsg: string) => {
+    const newItem = prompt(promptMsg);
+    if (newItem && !currentList.includes(newItem)) {
+      setter(prev => [...prev, newItem]);
+    }
+  };
+
+  const handleRemoveListItem = (setter: React.Dispatch<React.SetStateAction<string[]>>, currentList: string[], itemToRemove: string) => {
+    if (currentList.length > 1) {
+      if (confirm(`¿Eliminar "${itemToRemove}" de la lista?`)) {
+        setter(prev => prev.filter(i => i !== itemToRemove));
+      }
+    }
+  };
+
   const resetProductForm = () => {
     setProductForm({
       barcode: '', name: '', department: 'Otros', category: 'Otro' as unknown as Category,
-      stock: 0, minStock: 5, costUsd: 0, priceWholesale: 0, priceCost: 0, unitMeasure: ''
+      stock: 0, minStock: 5, costUsd: 0, priceWholesale: 0, priceCost: 0, unitMeasure: 'Unid'
     });
+    setIsService(false);
+    setBrand('Genérico');
+    setPartNumber('');
     setCostUsdInput('');
     setPriceWholesaleInput('');
     setPriceCostInput('');
@@ -515,8 +546,11 @@ export default function RegisterPurchase() {
       department: productForm.department,
       category: productForm.category,
       unitMeasure: productForm.unitMeasure,
-      stock: parseInt(stockInput) || 0,
-      minStock: parseInt(minStockInput) || 5,
+      brand,
+      partNumber,
+      isService,
+      stock: isService ? 0 : (parseInt(stockInput) || 0),
+      minStock: isService ? 0 : (parseInt(minStockInput) || 5),
       costUsd: roundTo4(cost),
       costBs: roundTo2(cost * state.exchangeRate),
       profitPercent: profitPercent,
@@ -531,7 +565,7 @@ export default function RegisterPurchase() {
       kitHasOwnStock: isKit ? kitHasOwnStock : false,
       kitComponents: isKit && kitComponents.length > 0 ? kitComponents : [],
       isPriceFixed: false
-    };
+    } as any;
     
     setIsSubmittingProduct(true);
     try {
@@ -882,8 +916,8 @@ export default function RegisterPurchase() {
               className="bg-[#1A2C4E] p-3 text-white rounded-t-xl cursor-move flex justify-between items-center flex-shrink-0"
             >
               <div className="flex items-center gap-2">
-                <Package size={18} className="text-primary" />
-                <h3 className="text-sm font-black">Nuevo Producto</h3>
+                {isService ? <Wrench size={18} className="text-primary" /> : <Package size={18} className="text-primary" />}
+                <h3 className="text-sm font-black">{isService ? 'Nuevo Servicio' : 'Nuevo Producto'}</h3>
               </div>
               <button onClick={() => setShowProductModal(false)} className="text-white font-black hover:text-white">
                 <X size={18} />
@@ -891,17 +925,43 @@ export default function RegisterPurchase() {
             </div>
 
             <form onSubmit={handleSaveProduct} className="flex-1 overflow-y-auto p-4">
+              {/* Selector de Tipo (Producto/Servicio) */}
+              <div className="flex gap-2 mb-4 p-1 bg-gray-100 rounded-lg">
+                <button 
+                  type="button"
+                  onClick={() => {
+                    setIsService(false);
+                    if (productForm.unitMeasure === serviceTypes[0] || serviceTypes.includes(productForm.unitMeasure)) setProductForm({...productForm, unitMeasure: 'Unid'});
+                  }}
+                  className={cn("flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-[10px] font-black transition-all", !isService ? "bg-white text-[#1A2C4E] shadow-sm" : "text-gray-500 hover:text-gray-700")}
+                >
+                  <Package size={14} /> PRODUCTO
+                </button>
+                <button 
+                  type="button"
+                  onClick={() => {
+                    setIsService(true);
+                    setProductForm({...productForm, unitMeasure: serviceTypes[0]});
+                  }}
+                  className={cn("flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-[10px] font-black transition-all", isService ? "bg-white text-[#1A2C4E] shadow-sm" : "text-gray-500 hover:text-gray-700")}
+                >
+                  <Wrench size={14} /> SERVICIO
+                </button>
+              </div>
+
               <div className="grid grid-cols-2 gap-4">
                 {/* Columna izquierda - Datos del producto */}
                 <div className="space-y-2">
                   <div>
-                    <label className="text-[8px] font-black uppercase text-black">Código de Barras</label>
-                    <Input value={productForm.barcode} onChange={e => setProductForm({...productForm, barcode: e.target.value})} className="h-7 text-xs" />
-                  </div>
-                  <div>
-                    <label className="text-[8px] font-black uppercase text-black">Nombre del Producto</label>
+                    <label className="text-[8px] font-black uppercase text-black">{isService ? 'Descripción del Servicio' : 'Nombre del Producto'}</label>
                     <Input value={productForm.name} onChange={e => setProductForm({...productForm, name: e.target.value})} className="h-7 text-xs" required />
                   </div>
+                  {!isService && (
+                    <div>
+                      <label className="text-[8px] font-black uppercase text-black">Código de Barras</label>
+                      <Input value={productForm.barcode} onChange={e => setProductForm({...productForm, barcode: e.target.value})} className="h-7 text-xs" />
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className="text-[8px] font-black uppercase text-black">Departamento</label>
@@ -916,11 +976,52 @@ export default function RegisterPurchase() {
                       </select>
                     </div>
                   </div>
-                  <div>
-                    <label className="text-[8px] font-black uppercase text-black">Unidad de Medida</label>
-                    <Input value={productForm.unitMeasure} onChange={e => setProductForm({...productForm, unitMeasure: e.target.value})} className="h-7 text-xs" placeholder="UNID, KG, LTS..." />
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
+
+                  {!isService ? (
+                    <>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[8px] font-black uppercase text-black">Marca</label>
+                          <div className="flex gap-1">
+                            <select value={brand} onChange={e => setBrand(e.target.value)} className="flex-1 h-7 border rounded px-2 text-xs bg-white font-black">
+                              {brands.map((b, i) => <option key={`brand-${i}`} value={b}>{b}</option>)}
+                            </select>
+                            <Button type="button" size="icon" className="h-7 w-7" variant="outline" onClick={() => handleAddListItem(setBrands, brands, "Ingrese nueva marca:")}><Plus size={12}/></Button>
+                            <Button type="button" size="icon" className="h-7 w-7" variant="outline" onClick={() => handleRemoveListItem(setBrands, brands, brand)}><Trash2 size={12} className="text-red-500"/></Button>
+                          </div>
+                        </div>
+                        <div>
+                          <label className="text-[8px] font-black uppercase text-black">Nro. de Parte</label>
+                          <Input value={partNumber} onChange={e => setPartNumber(e.target.value)} className="h-7 text-xs font-black" placeholder="OEM / Referencia" />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-[8px] font-black uppercase text-black">Unidad de Medida</label>
+                        <div className="flex gap-1">
+                          <select value={productForm.unitMeasure} onChange={e => setProductForm({...productForm, unitMeasure: e.target.value})} className="flex-1 h-7 border rounded px-2 text-xs bg-white font-black">
+                            {units.map((u, i) => <option key={`unit-${i}`} value={u}>{u}</option>)}
+                          </select>
+                          <Button type="button" size="icon" className="h-7 w-7" variant="outline" onClick={() => handleAddListItem(setUnits, units, "Nueva unidad (ej: Galón, Pote):")}><Plus size={12}/></Button>
+                          <Button type="button" size="icon" className="h-7 w-7" variant="outline" onClick={() => handleRemoveListItem(setUnits, units, productForm.unitMeasure)}><Trash2 size={12} className="text-red-500"/></Button>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div>
+                      <label className="text-[8px] font-black uppercase text-black">Tipo de Servicio</label>
+                      <div className="flex gap-1">
+                        <select value={productForm.unitMeasure} onChange={e => setProductForm({...productForm, unitMeasure: e.target.value})} className="flex-1 h-7 border rounded px-2 text-xs bg-white font-black">
+                          {serviceTypes.map((s, i) => <option key={`service-${i}`} value={s}>{s}</option>)}
+                        </select>
+                        <Button type="button" size="icon" className="h-7 w-7" variant="outline" onClick={() => handleAddListItem(setServiceTypes, serviceTypes, "Nombre del nuevo servicio:")}><Plus size={12}/></Button>
+                        <Button type="button" size="icon" className="h-7 w-7" variant="outline" onClick={() => handleRemoveListItem(setServiceTypes, serviceTypes, productForm.unitMeasure)}><Trash2 size={12} className="text-red-500"/></Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {!isService && (
+                    <>
+                    <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className="text-[8px] font-black uppercase text-black">Stock Inicial</label>
                       <Input type="text" inputMode="numeric" value={stockInput} onChange={(e) => setStockInput(e.target.value)} className="h-7 text-xs" placeholder="0" />
@@ -940,13 +1041,15 @@ export default function RegisterPurchase() {
                       <Input type="text" inputMode="decimal" value={priceCostInput} onChange={(e) => setPriceCostInput(e.target.value)} className="h-7 text-xs" placeholder="0.00" />
                     </div>
                   </div>
-                  
+                  </>
+                  )}
+
                   <div className="border-t pt-2 mt-1">
-                    <label className="flex items-center gap-2 cursor-pointer">
+                    <label className={cn("flex items-center gap-2 cursor-pointer", isService && "opacity-50 pointer-events-none")}>
                       <input type="checkbox" checked={isKit} onChange={e => setIsKit(e.target.checked)} className="rounded text-primary" />
                       <span className="text-[9px] font-black uppercase text-black">Es kit / compuesto</span>
                     </label>
-                    {isKit && (
+                    {isKit && !isService && (
                       <p className="text-[8px] text-black font-black mt-0.5">Al vender este producto, se descontarán las cantidades de sus componentes.</p>
                     )}
                   </div>
@@ -1025,7 +1128,7 @@ export default function RegisterPurchase() {
                 <div className="space-y-2">
                   <div className="bg-[#F5F5F5] rounded-lg p-3 space-y-2">
                     <div>
-                      <label className="text-[7px] font-black uppercase text-black">Costo Unitario USD</label>
+                      <label className="text-[7px] font-black uppercase text-black">{isService ? 'Costo Operativo USD' : 'Costo Unitario USD'}</label>
                       <Input 
                         type="text" 
                         inputMode="decimal" 
@@ -1080,7 +1183,7 @@ export default function RegisterPurchase() {
                     </div>
                     
                     <div>
-                      <label className="text-[7px] font-black uppercase text-black">Ganancia por Unidad (USD)</label>
+                      <label className="text-[7px] font-black uppercase text-black">{isService ? 'Margen por Servicio (USD)' : 'Ganancia por Unidad (USD)'}</label>
                       <div className="bg-white border rounded px-2 py-1 text-xs font-mono h-7 flex items-center font-black">
                         {(() => {
                           const cost = parseFloat(costUsdInput) || 0;
@@ -1089,7 +1192,7 @@ export default function RegisterPurchase() {
                           return profit > 0 ? formatUsd(profit) : '—';
                         })()}
                       </div>
-                      <p className="text-[6px] text-black font-black mt-0.5">Ganancia en USD por cada unidad vendida (Precio Detal - Costo)</p>
+                      <p className="text-[6px] text-black font-black mt-0.5">{isService ? 'Diferencia entre precio de venta y costo operativo' : 'Ganancia en USD por cada unidad vendida (Precio Detal - Costo)'}</p>
                     </div>
                     
                     <div className="grid grid-cols-2 gap-2">
@@ -1190,7 +1293,7 @@ export default function RegisterPurchase() {
                         })()}</span>
                       </div>
                       <div className="border-t border-gray-300 pt-1 mt-1">
-                        <div className="flex justify-between">
+                        <div className={cn("flex justify-between", isService && "hidden")}>
                           <span className="text-black font-black">Precio Mayor USD:</span>
                           <span className="font-black text-black">USD {parseFloat(localPriceUsd || '0').toFixed(2)}</span>
                         </div>

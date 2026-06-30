@@ -73,19 +73,16 @@ interface KardexEntry {
 }
 
 const DEFAULT_CATEGORIES: Category[] = [
-  { id: 'Whisky', name: 'Whisky' },
-  { id: 'Ron', name: 'Ron' },
-  { id: 'Cerveza', name: 'Cerveza' },
-  { id: 'Vino', name: 'Vino' },
-  { id: 'Vodka', name: 'Vodka' },
-  { id: 'Tequila', name: 'Tequila' },
-  { id: 'Licor', name: 'Licor' },
-  { id: 'Gin', name: 'Gin' },
+  { id: 'lubricantes', name: 'Lubricantes' },
+  { id: 'repuestos', name: 'Repuestos Automotrices' },
+  { id: 'partes_electricas', name: 'Partes Eléctricas' },
+  { id: 'servicio', name: 'Servicio Automotriz' },
+  { id: 'filtros', name: 'Filtros' },
   { id: 'Otro', name: 'Otro' }
 ];
-const DEFAULT_DEPARTMENTS = ['Polar', 'Munchy', 'Otros'];
+const DEFAULT_DEPARTMENTS = ['Lubricantes', 'Motor', 'Frenos', 'Suspensión', 'Electricidad', 'Servicios', 'Otros'];
 
-type InventoryTab = 'catalogo' | 'reporte' | 'ajustes';
+type InventoryTab = 'catalogo' | 'reporte' | 'ajustes' | 'ventas';
 
 // ✅ MAPEO UNIFICADO DE TIPOS DE KARDEX (sincronizado con syncService.ts)
 // Este mapeo convierte los tipos internos a los que se muestran en la UI
@@ -225,6 +222,66 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
   
   const [localPriceUsd, setLocalPriceUsd] = useState('');
   
+  // ✅ CÁLCULO DE VENTAS PARA REPORTE SEGMENTADO
+  const salesEntries = useMemo(() => {
+    const sales: (KardexEntry & { productName: string; isService: boolean; salePriceUsd: number })[] = [];
+    
+    let start: Date | null = null;
+    let end: Date | null = null;
+    const now = new Date();
+    
+    switch (dateRangePreset) {
+      case 'day':
+        start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, -1);
+        break;
+      case 'month':
+        start = new Date(now.getFullYear(), now.getMonth(), 1);
+        end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+        break;
+      case 'year':
+        start = new Date(now.getFullYear(), 0, 1);
+        end = new Date(now.getFullYear(), 11, 31, 23, 59, 59);
+        break;
+      case 'custom':
+        if (adjustmentStartDate && adjustmentEndDate) {
+          start = new Date(adjustmentStartDate);
+          start.setHours(0,0,0,0);
+          end = new Date(adjustmentEndDate);
+          end.setHours(23,59,59,999);
+        }
+        break;
+    }
+
+    Object.entries(kardexEntries).forEach(([pid, entries]) => {
+      const product = products.find(p => p.id === Number(pid));
+      if (!product) return;
+
+      entries.forEach(entry => {
+        if (entry.type === 'venta' || entry.type === 'salida_venta') {
+          const entryDate = new Date(entry.date);
+          if (start && entryDate < start) return;
+          if (end && entryDate > end) return;
+
+          sales.push({
+            ...entry,
+            productName: product.name,
+            isService: !!(product as any).isService,
+            salePriceUsd: product.priceUsd || 0
+          });
+        }
+      });
+    });
+    
+    return sales.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [kardexEntries, products, dateRangePreset, adjustmentStartDate, adjustmentEndDate]);
+
+  const salesSummary = useMemo(() => {
+    const productIncome = salesEntries.filter(s => !s.isService).reduce((sum, s) => sum + (Math.abs(s.quantity) * s.salePriceUsd), 0);
+    const serviceIncome = salesEntries.filter(s => s.isService).reduce((sum, s) => sum + (Math.abs(s.quantity) * s.salePriceUsd), 0);
+    return { productIncome, serviceIncome, totalIncome: productIncome + serviceIncome };
+  }, [salesEntries]);
+
   const isUpdatingRef = useRef(false);
   
   const formRef = useRef<HTMLFormElement>(null);
@@ -857,7 +914,7 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
       toast({ title: "No se puede eliminar", description: "La categoría 'Otro' es requerida", variant: "destructive" });
       return;
     }
-    if (products.some(p => p.category === cat.id)) {
+    if (products.some(p => getCategoryId(p.category) === cat.id)) {
       toast({ title: "No se puede eliminar", description: "Hay productos asociados a esta categoría", variant: "destructive" });
       return;
     }
@@ -981,6 +1038,74 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
     } else {
       handleExportPDF();
     }
+  };
+
+  const handleExportSalesPDF = () => {
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return;
+    
+    const html = `
+      <html>
+        <head>
+          <title>Reporte de Ventas - MasterPOS</title>
+          <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 30px; color: #333; }
+            .header { text-align: center; border-bottom: 2px solid #1A2C4E; padding-bottom: 10px; margin-bottom: 20px; }
+            h1 { margin: 0; color: #1A2C4E; font-size: 20px; }
+            .info { margin-bottom: 20px; font-size: 12px; }
+            table { width: 100%; border-collapse: collapse; }
+            th { background-color: #1A2C4E; color: white; text-align: left; padding: 8px; font-size: 11px; }
+            td { padding: 6px 8px; border-bottom: 1px solid #ddd; font-size: 10px; }
+            .text-right { text-align: right; }
+            .summary-box { margin-top: 20px; padding: 15px; background-color: #f5f5f5; border-radius: 8px; }
+            .summary-item { display: flex; justify-content: space-between; margin-bottom: 5px; font-weight: bold; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1>MasterPOS - Reporte de Ventas Segmentado</h1>
+          </div>
+          <div class="info">
+            <p><strong>Periodo:</strong> ${dateRangePreset === 'custom' ? `${adjustmentStartDate} al ${adjustmentEndDate}` : dateRangePreset}</p>
+            <p><strong>Fecha de Generación:</strong> ${new Date().toLocaleString('es-VE')}</p>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>FECHA</th>
+                <th>PRODUCTO</th>
+                <th>TIPO</th>
+                <th class="text-right">CANT.</th>
+                <th class="text-right">PRECIO USD</th>
+                <th class="text-right">TOTAL USD</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${salesEntries.map(sale => `
+                <tr>
+                  <td>${formatVenezuelaDateTime(sale.date)}</td>
+                  <td>${sale.productName}</td>
+                  <td>${sale.isService ? 'SERVICIO' : 'PRODUCTO'}</td>
+                  <td class="text-right">${Math.abs(sale.quantity)}</td>
+                  <td class="text-right">${formatUsd(sale.salePriceUsd)}</td>
+                  <td class="text-right">${formatUsd(Math.abs(sale.quantity) * sale.salePriceUsd)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+          <div class="summary-box">
+            <div class="summary-item"><span>Ingresos por Productos:</span><span>${formatUsd(salesSummary.productIncome)}</span></div>
+            <div class="summary-item"><span>Ingresos por Servicios:</span><span>${formatUsd(salesSummary.serviceIncome)}</span></div>
+            <div class="summary-item" style="border-top: 1px solid #ccc; padding-top: 5px; margin-top: 5px; font-size: 1.2em;">
+              <span>TOTAL INGRESOS:</span><span>${formatUsd(salesSummary.totalIncome)}</span>
+            </div>
+          </div>
+        </body>
+      </html>
+    `;
+    printWindow.document.write(html);
+    printWindow.document.close();
+    setTimeout(() => { printWindow.print(); printWindow.close(); }, 500);
   };
   
   const filteredProducts = useMemo(() => {
@@ -1275,6 +1400,18 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
           <History size={14} />
           Historial de Ajustes
         </button>
+        <button
+          onClick={() => setActiveTab('ventas')}
+          className={cn(
+            "flex items-center gap-2 px-4 py-2 rounded-t-lg font-black text-sm transition-all",
+            activeTab === 'ventas'
+              ? "bg-white text-black border border-b-0 border-[#9E9E9E]"
+              : "text-black hover:bg-white/50"
+          )}
+        >
+          <TrendingUp size={14} />
+          Reporte de Ventas (Ingresos)
+        </button>
       </div>
       
       {activeTab === 'catalogo' ? (
@@ -1448,7 +1585,7 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
             <div className="text-[9px] text-black font-black">Valor total inventario: <span className="font-bold text-black">{formatUsd(reportProducts.reduce((sum, p) => sum + ((p.costUsd || 0) * p.stock), 0))}</span></div>
           </div>
         </div>
-      ) : (
+      ) : activeTab === 'ajustes' ? (
         <div className="flex-1 flex flex-col overflow-hidden px-6 mt-4">
           <div className="flex justify-between items-center mb-3 gap-2 flex-wrap flex-shrink-0">
             <div className="flex items-center gap-2">
@@ -1471,7 +1608,6 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
               Total ajustes: <span className="font-black">{formatUsd(totalAdjustmentUsd)}</span>
             </div>
           </div>
-          
           <div className="bg-white border border-[#9E9E9E] rounded-xl overflow-hidden shadow-sm flex-1 flex flex-col min-h-0">
             <div className="overflow-x-auto flex-1">
               <table className="w-full text-xs">
@@ -1514,6 +1650,71 @@ export default function InventoryModule({ state }: { state: ReturnType<typeof us
             <div className="bg-gray-50 p-2 border-t text-[10px] text-black font-black flex justify-between">
               <span>{filteredAdjustments.length} registros</span>
               <span>Los ajustes generan automáticamente asientos contables (ingresos/egresos)</span>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="flex-1 flex flex-col overflow-hidden px-6 mt-4">
+          <div className="flex justify-between items-center mb-3 gap-2 flex-wrap flex-shrink-0">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-black uppercase text-black">Filtrar por:</span>
+              <div className="flex gap-1">
+                <button onClick={() => setDateRangePreset('day')} className={cn("px-2 py-1 text-[10px] font-black rounded border", dateRangePreset === 'day' ? "bg-primary text-black" : "bg-white text-black")}>Hoy</button>
+                <button onClick={() => setDateRangePreset('month')} className={cn("px-2 py-1 text-[10px] font-black rounded border", dateRangePreset === 'month' ? "bg-primary text-black" : "bg-white text-black")}>Este Mes</button>
+                <button onClick={() => setDateRangePreset('year')} className={cn("px-2 py-1 text-[10px] font-black rounded border", dateRangePreset === 'year' ? "bg-primary text-black" : "bg-white text-black")}>Este Año</button>
+                <button onClick={() => setDateRangePreset('custom')} className={cn("px-2 py-1 text-[10px] font-black rounded border", dateRangePreset === 'custom' ? "bg-primary text-black" : "bg-white text-black")}>Personalizado</button>
+              </div>
+            </div>
+            {dateRangePreset === 'custom' && (
+              <div className="flex items-center gap-2">
+                <Input type="date" value={adjustmentStartDate} onChange={e => setAdjustmentStartDate(e.target.value)} className="h-7 text-xs w-36 font-black" />
+                <span className="text-xs font-black">-</span>
+                <Input type="date" value={adjustmentEndDate} onChange={e => setAdjustmentEndDate(e.target.value)} className="h-7 text-xs w-36 font-black" />
+              </div>
+            )}
+            <div className="ml-auto flex items-center gap-2">
+              <Button onClick={handleExportSalesPDF} variant="outline" className="h-8 text-[10px] font-black border-[#9E9E9E] text-black">
+                <Printer size={13} className="mr-1" /> EXPORTAR PDF
+              </Button>
+            </div>
+          </div>
+          <div className="bg-white border border-[#9E9E9E] rounded-xl overflow-hidden shadow-sm flex-1 flex flex-col min-h-0">
+            <div className="overflow-x-auto flex-1">
+              <table className="w-full text-xs">
+                <thead className="bg-gray-100 sticky top-0">
+                  <tr>
+                    <th className="p-2 text-left font-black text-black">Fecha</th>
+                    <th className="p-2 text-left font-black text-black">Producto</th>
+                    <th className="p-2 text-center font-black text-black">Tipo</th>
+                    <th className="p-2 text-right font-black text-black">Cant.</th>
+                    <th className="p-2 text-right font-black text-black">Precio $</th>
+                    <th className="p-2 text-right font-black text-black">Total $</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {salesEntries.map((sale, idx) => (
+                    <tr key={`${sale.id}_${idx}`} className="border-b border-gray-100 hover:bg-gray-50">
+                      <td className="p-2 whitespace-nowrap text-[11px] font-mono font-black text-black">{formatVenezuelaDateTime(sale.date)}</td>
+                      <td className="p-2 font-black text-black">{sale.productName}</td>
+                      <td className="p-2 text-center">
+                        <span className={cn("px-2 py-0.5 rounded-full text-[9px] font-black", sale.isService ? "bg-purple-100 text-purple-700" : "bg-blue-100 text-blue-700")}>
+                          {sale.isService ? "SERVICIO" : "PRODUCTO"}
+                        </span>
+                      </td>
+                      <td className="p-2 text-right font-mono font-black text-black">{Math.abs(sale.quantity)}</td>
+                      <td className="p-2 text-right font-mono font-black text-black">{formatUsd(sale.salePriceUsd)}</td>
+                      <td className="p-2 text-right font-mono font-black text-black">{formatUsd(Math.abs(sale.quantity) * sale.salePriceUsd)}</td>
+                    </tr>
+                  ))}
+                  {salesEntries.length === 0 && (
+                    <tr><td colSpan={6} className="p-4 text-center text-black font-black italic">No hay ventas en el período seleccionado</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="bg-gray-50 p-2 border-t text-[10px] text-black font-black flex justify-between">
+              <span>Total Ingresos: {formatUsd(salesSummary.totalIncome)}</span>
+              <span>{salesEntries.length} transacciones</span>
             </div>
           </div>
         </div>

@@ -7,9 +7,18 @@ import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { Product, Category, KitComponent } from '@/lib/types';
-import { formatBs, formatUsd } from '@/lib/currency-formatter';
-import { Package, Percent, X, PlusCircle, Trash2 } from 'lucide-react';
+import { formatBs, formatUsd, formatUsdNumber } from '@/lib/currency-formatter';
+import { Package, Percent, X, PlusCircle, Trash2, Wrench, Plus, Tag } from 'lucide-react';
 import syncService from '@/services/syncService';
+
+const INITIAL_UNITS = [
+  "Unid", "Lts", "gms", "mm", "galon", "Caja", "Docena", "Kit", 
+  "Juego", "Empaque", "Pote", "Paila", "Pieza(s)", "Metro", "cmts", "otro"
+];
+
+const INITIAL_SERVICES = [
+  "Autolavado", "Aspirado", "Cambio de Aceite", "Limpieza de Inyectores", "Escaneo", "Mecánica Ligera"
+];
 
 const roundTo2 = (num: number): number => Math.round(num * 100) / 100;
 const roundTo4 = (num: number): number => Math.round(num * 10000) / 10000;
@@ -55,7 +64,13 @@ const ProductFormModal = memo(function ProductFormModal({
   const [name, setName] = useState('');
   const [department, setDepartment] = useState('Otros');
   const [category, setCategory] = useState('Otro');
-  const [unitMeasure, setUnitMeasure] = useState('');
+  const [unitMeasure, setUnitMeasure] = useState('Unid');
+  const [units, setUnits] = useState<string[]>(INITIAL_UNITS);
+  const [brand, setBrand] = useState('Genérico');
+  const [brands, setBrands] = useState<string[]>(['Genérico']);
+  const [partNumber, setPartNumber] = useState('');
+  const [serviceTypes, setServiceTypes] = useState<string[]>(INITIAL_SERVICES);
+  const [isService, setIsService] = useState(false);
   const [stockInput, setStockInput] = useState('');
   const [minStockInput, setMinStockInput] = useState('');
   const [priceWholesaleInput, setPriceWholesaleInput] = useState('');
@@ -83,7 +98,10 @@ const ProductFormModal = memo(function ProductFormModal({
       setName(editingProduct.name);
       setDepartment(editingProduct.department || 'Otros');
       setCategory(typeof editingProduct.category === 'string' ? editingProduct.category : editingProduct.category?.id || 'Otro');
-      setUnitMeasure(editingProduct.unitMeasure || '');
+      setUnitMeasure(editingProduct.unitMeasure || 'Unid');
+      setBrand(editingProduct.brand || 'Genérico');
+      setPartNumber(editingProduct.partNumber || '');
+      setIsService(editingProduct.isService || false);
       setStockInput(editingProduct.stock.toString());
       setMinStockInput((editingProduct.minStock || 5).toString());
       setPriceWholesaleInput(editingProduct.priceWholesale?.toString() || '');
@@ -102,7 +120,10 @@ const ProductFormModal = memo(function ProductFormModal({
       setName('');
       setDepartment('Otros');
       setCategory('Otro');
-      setUnitMeasure('');
+      setUnitMeasure('Unid');
+      setBrand('Genérico');
+      setPartNumber('');
+      setIsService(false);
       setStockInput('');
       setMinStockInput('5');
       setPriceWholesaleInput('');
@@ -158,6 +179,21 @@ const ProductFormModal = memo(function ProductFormModal({
     setKitComponents(prev => prev.filter(c => c.productId !== productId));
   };
 
+  const handleAddListItem = (setter: React.Dispatch<React.SetStateAction<string[]>>, currentList: string[], promptMsg: string) => {
+    const newItem = prompt(promptMsg);
+    if (newItem && !currentList.includes(newItem)) {
+      setter(prev => [...prev, newItem]);
+    }
+  };
+
+  const handleRemoveListItem = (setter: React.Dispatch<React.SetStateAction<string[]>>, currentList: string[], itemToRemove: string) => {
+    if (currentList.length > 1) {
+      if (confirm(`¿Eliminar "${itemToRemove}" de la lista?`)) {
+        setter(prev => prev.filter(i => i !== itemToRemove));
+      }
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
@@ -211,8 +247,11 @@ const ProductFormModal = memo(function ProductFormModal({
       department: department || 'Otros',
       category: category as unknown as Category,
       unitMeasure,
-      stock: parseInt(stockInput) || 0,
-      minStock: parseInt(minStockInput) || 5,
+      brand,
+      partNumber,
+      isService,
+      stock: isService ? 0 : (parseInt(stockInput) || 0),
+      minStock: isService ? 0 : (parseInt(minStockInput) || 5),
       costUsd: roundTo4(cost),
       costBs: cost > 0 ? roundTo2(cost * exchangeRate) : 0,
       profitPercent: profitPercent,
@@ -255,8 +294,8 @@ const ProductFormModal = memo(function ProductFormModal({
         <DialogHeader className="bg-[#1A2C4E] p-3 text-white rounded-t-xl flex-shrink-0">
           <div className="flex justify-between items-center">
             <DialogTitle className="text-sm font-black flex items-center gap-2">
-              <Package size={16} />
-              {editingProduct ? 'Editar Producto' : 'Nuevo Producto'}
+              {isService ? <Wrench size={16} /> : <Package size={16} />}
+              {editingProduct ? (isService ? 'Editar Servicio' : 'Editar Producto') : (isService ? 'Nuevo Servicio' : 'Nuevo Producto')}
             </DialogTitle>
             <button type="button" onClick={onClose} className="text-white/60 hover:text-white">
               <X size={16} />
@@ -266,16 +305,41 @@ const ProductFormModal = memo(function ProductFormModal({
         
         <form onSubmit={handleSubmit} className="flex flex-col flex-1 overflow-hidden">
           <div className="flex-1 overflow-y-auto p-4">
+            <div className="flex gap-2 mb-4 p-1 bg-gray-100 rounded-lg">
+              <button 
+                type="button"
+                onClick={() => {
+                  setIsService(false);
+                  if (unitMeasure === serviceTypes[0] || serviceTypes.includes(unitMeasure)) setUnitMeasure('Unid');
+                }}
+                className={cn("flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-[10px] font-black transition-all", !isService ? "bg-white text-[#1A2C4E] shadow-sm" : "text-gray-500 hover:text-gray-700")}
+              >
+                <Package size={14} /> PRODUCTO
+              </button>
+              <button 
+                type="button"
+                onClick={() => {
+                  setIsService(true);
+                  setUnitMeasure(serviceTypes[0]);
+                }}
+                className={cn("flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-[10px] font-black transition-all", isService ? "bg-white text-[#1A2C4E] shadow-sm" : "text-gray-500 hover:text-gray-700")}
+              >
+                <Wrench size={14} /> SERVICIO
+              </button>
+            </div>
+
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-2">
                 <div>
-                  <label className="text-[8px] font-black uppercase">Código de Barras</label>
-                  <Input value={barcode} onChange={e => setBarcode(e.target.value)} className="h-7 text-xs" />
-                </div>
-                <div>
-                  <label className="text-[8px] font-black uppercase">Nombre del Producto</label>
+                  <label className="text-[8px] font-black uppercase">{isService ? 'Descripción del Servicio' : 'Nombre del Producto'}</label>
                   <Input value={name} onChange={e => setName(e.target.value)} className="h-7 text-xs" required />
                 </div>
+                {!isService && (
+                  <div>
+                    <label className="text-[8px] font-black uppercase">Código de Barras</label>
+                    <Input value={barcode} onChange={e => setBarcode(e.target.value)} className="h-7 text-xs" />
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="text-[8px] font-black uppercase">Departamento</label>
@@ -290,115 +354,158 @@ const ProductFormModal = memo(function ProductFormModal({
                     </select>
                   </div>
                 </div>
-                <div>
-                  <label className="text-[8px] font-black uppercase">Unidad de Medida</label>
-                  <Input value={unitMeasure} onChange={e => setUnitMeasure(e.target.value)} className="h-7 text-xs" placeholder="UNID, KG, LTS..." />
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-[8px] font-black uppercase">Stock Inicial</label>
-                    <Input type="text" inputMode="numeric" value={stockInput} onChange={e => setStockInput(e.target.value)} className="h-7 text-xs" placeholder="0" readOnly={!!editingProduct} />
-                  </div>
-                  <div>
-                    <label className="text-[8px] font-black uppercase">Stock Mínimo</label>
-                    <Input type="text" inputMode="numeric" value={minStockInput} onChange={e => setMinStockInput(e.target.value)} className="h-7 text-xs" placeholder="5" />
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-[8px] font-black uppercase">Precio Mayor (USD)</label>
-                    <Input type="text" inputMode="decimal" value={priceWholesaleInput} onChange={e => setPriceWholesaleInput(e.target.value)} className="h-7 text-xs" placeholder="0.00" />
-                  </div>
-                  <div>
-                    <label className="text-[8px] font-black uppercase">Precio Costo (USD)</label>
-                    <Input type="text" inputMode="decimal" value={priceCostInput} onChange={e => setPriceCostInput(e.target.value)} className="h-7 text-xs" placeholder="0.00" />
-                  </div>
-                </div>
-                
-                <div className="border-t pt-2 mt-1">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" checked={isKit} onChange={e => setIsKit(e.target.checked)} className="rounded text-primary" />
-                    <span className="text-[9px] font-black uppercase">Es kit / compuesto</span>
-                  </label>
-                  <p className="text-[7px] text-black/40 mt-1">Al vender este producto, se descontarán las cantidades de sus componentes.</p>
-                </div>
-                
-                {isKit && (
-                  <div className="border border-dashed border-blue-300 rounded-lg p-2 bg-blue-50/30 space-y-2">
-                    <div className="flex items-center justify-between bg-white/50 rounded p-1.5">
-                      <span className="text-[8px] font-bold uppercase">Stock del kit:</span>
-                      <div className="flex gap-2">
-                        <button type="button" onClick={() => setKitHasOwnStock(false)} className={cn("px-2 py-0.5 rounded text-[9px] font-bold transition-all", !kitHasOwnStock ? "bg-primary text-black" : "bg-gray-200 text-gray-600")}>Sin stock propio</button>
-                        <button type="button" onClick={() => setKitHasOwnStock(true)} className={cn("px-2 py-0.5 rounded text-[9px] font-bold transition-all", kitHasOwnStock ? "bg-primary text-black" : "bg-gray-200 text-gray-600")}>Con stock propio</button>
+
+                {!isService ? (
+                  <>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[8px] font-black uppercase">Marca</label>
+                        <div className="flex gap-1">
+                          <select value={brand} onChange={e => setBrand(e.target.value)} className="flex-1 h-7 border rounded px-2 text-xs bg-white">
+                            {brands.map((b, i) => <option key={`brand-${i}`} value={b}>{b}</option>)}
+                          </select>
+                          <Button type="button" size="icon" className="h-7 w-7" variant="outline" onClick={() => handleAddListItem(setBrands, brands, "Ingrese nueva marca:")}><Plus size={12}/></Button>
+                          <Button type="button" size="icon" className="h-7 w-7" variant="outline" onClick={() => handleRemoveListItem(setBrands, brands, brand)}><Trash2 size={12} className="text-red-500"/></Button>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-[8px] font-black uppercase">Nro. de Parte</label>
+                        <Input value={partNumber} onChange={e => setPartNumber(e.target.value)} className="h-7 text-xs" placeholder="OEM / Referencia" />
                       </div>
                     </div>
-                    <p className="text-[7px] text-blue-700 bg-blue-100 rounded px-2 py-1">{!kitHasOwnStock ? "📦 Sin stock propio: El kit siempre se puede vender si hay suficiente stock de sus componentes. Al vender, SOLO se descuentan los componentes." : "⚠️ Con stock propio: El kit tiene su propio inventario. Al vender, se descuenta 1 del kit + las cantidades de sus componentes."}</p>
-                    <p className="text-[8px] font-bold text-blue-800 mb-1 flex items-center gap-1"><Package size={10} /> Componentes del kit</p>
-                    <div className="space-y-2">
-                      {kitComponents.length > 0 && (
-                        <div className="max-h-24 overflow-y-auto space-y-1">
-                          {kitComponents.map(comp => {
-                            const childProd = products.find(p => p.id === comp.productId);
-                            return (
-                              <div key={comp.productId} className="flex justify-between items-center bg-white rounded px-2 py-1 text-[10px]">
-                                <span>{childProd?.name || 'Producto'} x{comp.quantity}</span>
-                                <button type="button" onClick={() => removeKitComponent(comp.productId)} className="text-red-500">
-                                  <Trash2 size={10} />
-                                </button>
-                              </div>
-                            );
-                          })}
+                    <div>
+                      <label className="text-[8px] font-black uppercase">Unidad de Medida</label>
+                      <div className="flex gap-1">
+                        <select value={unitMeasure} onChange={e => setUnitMeasure(e.target.value)} className="flex-1 h-7 border rounded px-2 text-xs bg-white">
+                          {units.map((u, i) => <option key={`unit-${i}`} value={u}>{u}</option>)}
+                        </select>
+                        <Button type="button" size="icon" className="h-7 w-7" variant="outline" onClick={() => handleAddListItem(setUnits, units, "Nueva unidad (ej: Galón, Pote):")}><Plus size={12}/></Button>
+                        <Button type="button" size="icon" className="h-7 w-7" variant="outline" onClick={() => handleRemoveListItem(setUnits, units, unitMeasure)}><Trash2 size={12} className="text-red-500"/></Button>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div>
+                    <label className="text-[8px] font-black uppercase">Tipo de Servicio</label>
+                    <div className="flex gap-1">
+                      <select value={unitMeasure} onChange={e => setUnitMeasure(e.target.value)} className="flex-1 h-7 border rounded px-2 text-xs bg-white">
+                        {serviceTypes.map((s, i) => <option key={`service-${i}`} value={s}>{s}</option>)}
+                      </select>
+                      <Button type="button" size="icon" className="h-7 w-7" variant="outline" onClick={() => handleAddListItem(setServiceTypes, serviceTypes, "Nombre del nuevo servicio:")}><Plus size={12}/></Button>
+                      <Button type="button" size="icon" className="h-7 w-7" variant="outline" onClick={() => handleRemoveListItem(setServiceTypes, serviceTypes, unitMeasure)}><Trash2 size={12} className="text-red-500"/></Button>
+                    </div>
+                  </div>
+                )}
+
+                {!isService && (
+                  <>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[8px] font-black uppercase">Stock Inicial</label>
+                        <Input type="text" inputMode="numeric" value={stockInput} onChange={e => setStockInput(e.target.value)} className="h-7 text-xs" placeholder="0" readOnly={!!editingProduct} />
+                      </div>
+                      <div>
+                        <label className="text-[8px] font-black uppercase">Stock Mínimo</label>
+                        <Input type="text" inputMode="numeric" value={minStockInput} onChange={e => setMinStockInput(e.target.value)} className="h-7 text-xs" placeholder="5" />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[8px] font-black uppercase">Precio Mayor (USD)</label>
+                        <Input type="text" inputMode="decimal" value={priceWholesaleInput} onChange={e => setPriceWholesaleInput(e.target.value)} className="h-7 text-xs" placeholder="0.00" />
+                      </div>
+                      <div>
+                        <label className="text-[8px] font-black uppercase">Precio Costo (USD)</label>
+                        <Input type="text" inputMode="decimal" value={priceCostInput} onChange={e => setPriceCostInput(e.target.value)} className="h-7 text-xs" placeholder="0.00" />
+                      </div>
+                    </div>
+                    
+                    <div className="border-t pt-2 mt-1">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" checked={isKit} onChange={e => setIsKit(e.target.checked)} className="rounded text-primary" />
+                        <span className="text-[9px] font-black uppercase">Es kit / compuesto</span>
+                      </label>
+                      <p className="text-[7px] text-black/40 mt-1">Al vender este producto, se descontarán las cantidades de sus componentes.</p>
+                    </div>
+                    
+                    {isKit && (
+                      <div className="border border-dashed border-blue-300 rounded-lg p-2 bg-blue-50/30 space-y-2">
+                        <div className="flex items-center justify-between bg-white/50 rounded p-1.5">
+                          <span className="text-[8px] font-bold uppercase">Stock del kit:</span>
+                          <div className="flex gap-2">
+                            <button type="button" onClick={() => setKitHasOwnStock(false)} className={cn("px-2 py-0.5 rounded text-[9px] font-bold transition-all", !kitHasOwnStock ? "bg-primary text-black" : "bg-gray-200 text-gray-600")}>Sin stock propio</button>
+                            <button type="button" onClick={() => setKitHasOwnStock(true)} className={cn("px-2 py-0.5 rounded text-[9px] font-bold transition-all", kitHasOwnStock ? "bg-primary text-black" : "bg-gray-200 text-gray-600")}>Con stock propio</button>
+                          </div>
                         </div>
-                      )}
-                      <div className="flex flex-col gap-1">
-                        <div className="relative">
-                          <Input 
-                            type="text" 
-                            placeholder="Buscar producto componente..." 
-                            value={searchChildProduct} 
-                            onChange={(e) => {
-                              setSearchChildProduct(e.target.value);
-                              setHideChildResults(false);
-                              if (selectedChildProduct && e.target.value !== selectedChildProduct.name) {
-                                setSelectedChildProduct(null);
-                              }
-                            }} 
-                            className="h-7 text-xs pr-7" 
-                          />
-                          {!hideChildResults && childProductResults.length > 0 && (
-                            <div className="absolute top-full left-0 right-0 bg-white border rounded shadow z-20 mt-1 max-h-24 overflow-y-auto">
-                              {childProductResults.map((p, i) => (
-                                <button 
-                                  key={`child-${p.id}-${i}`} 
-                                  type="button" 
-                                  onClick={() => {
-                                    setSelectedChildProduct(p);
-                                    setSearchChildProduct(p.name);
-                                    setHideChildResults(true);
-                                  }} 
-                                  className="w-full text-left px-2 py-1 text-[10px] hover:bg-primary/10"
-                                >
-                                  {p.name} ({formatUsd(p.priceUsd)})
-                                </button>
-                              ))}
+                        <p className="text-[7px] text-blue-700 bg-blue-100 rounded px-2 py-1">{!kitHasOwnStock ? "📦 Sin stock propio: El kit siempre se puede vender si hay suficiente stock de sus componentes. Al vender, SOLO se descuentan los componentes." : "⚠️ Con stock propio: El kit tiene su propio inventario. Al vender, se descuenta 1 del kit + las cantidades de sus componentes."}</p>
+                        <p className="text-[8px] font-bold text-blue-800 mb-1 flex items-center gap-1"><Package size={10} /> Componentes del kit</p>
+                        <div className="space-y-2">
+                          {kitComponents.length > 0 && (
+                            <div className="max-h-24 overflow-y-auto space-y-1">
+                              {kitComponents.map(comp => {
+                                const childProd = products.find(p => p.id === comp.productId);
+                                return (
+                                  <div key={comp.productId} className="flex justify-between items-center bg-white rounded px-2 py-1 text-[10px]">
+                                    <span>{childProd?.name || 'Producto'} x{comp.quantity}</span>
+                                    <button type="button" onClick={() => removeKitComponent(comp.productId)} className="text-red-500">
+                                      <Trash2 size={10} />
+                                    </button>
+                                  </div>
+                                );
+                              })}
                             </div>
                           )}
-                        </div>
-                        {selectedChildProduct && (
-                          <div className="flex gap-1 items-center">
-                            <Input type="text" inputMode="numeric" value={childQuantity} onChange={e => setChildQuantity(e.target.value)} className="h-7 text-xs w-20 text-center" placeholder="Cant." />
-                            <Button type="button" onClick={addKitComponent} size="sm" className="h-7 text-[9px] bg-primary text-black">Agregar</Button>
+                          <div className="flex flex-col gap-1">
+                            <div className="relative">
+                              <Input 
+                                type="text" 
+                                placeholder="Buscar producto componente..." 
+                                value={searchChildProduct} 
+                                onChange={(e) => {
+                                  setSearchChildProduct(e.target.value);
+                                  setHideChildResults(false);
+                                  if (selectedChildProduct && e.target.value !== selectedChildProduct.name) {
+                                    setSelectedChildProduct(null);
+                                  }
+                                }} 
+                                className="h-7 text-xs pr-7" 
+                              />
+                              {!hideChildResults && childProductResults.length > 0 && (
+                                <div className="absolute top-full left-0 right-0 bg-white border rounded shadow z-20 mt-1 max-h-24 overflow-y-auto">
+                                  {childProductResults.map((p, i) => (
+                                    <button 
+                                      key={`child-${p.id}-${i}`} 
+                                      type="button" 
+                                      onClick={() => {
+                                        setSelectedChildProduct(p);
+                                        setSearchChildProduct(p.name);
+                                        setHideChildResults(true);
+                                      }} 
+                                      className="w-full text-left px-2 py-1 text-[10px] hover:bg-primary/10"
+                                    >
+                                      {p.name} ({formatUsd(p.priceUsd)})
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                            {selectedChildProduct && (
+                              <div className="flex gap-1 items-center">
+                                <Input type="text" inputMode="numeric" value={childQuantity} onChange={e => setChildQuantity(e.target.value)} className="h-7 text-xs w-20 text-center" placeholder="Cant." />
+                                <Button type="button" onClick={addKitComponent} size="sm" className="h-7 text-[9px] bg-primary text-black">Agregar</Button>
+                              </div>
+                            )}
                           </div>
-                        )}
+                        </div>
                       </div>
-                    </div>
-                  </div>
+                    )}
+                  </>
                 )}
               </div>
               
               <div className="bg-[#F5F5F5] rounded-lg p-3 space-y-2">
-                <div className="w-3/4">
-                  <label className="text-[7px] font-bold uppercase">Costo Unitario USD</label>
+                <div className="w-full">
+                  <label className="text-[7px] font-bold uppercase">{isService ? 'Costo de Operación USD' : 'Costo Unitario USD'}</label>
                   <Input 
                     type="text" 
                     inputMode="decimal" 
@@ -466,7 +573,7 @@ const ProductFormModal = memo(function ProductFormModal({
 
                 <div className="mt-1 pt-1 border-t border-dashed border-gray-300">
                   <div className="flex justify-between items-center">
-                    <label className="text-[7px] font-bold uppercase text-green-600">Ganancia por unidad (USD)</label>
+                    <label className="text-[7px] font-bold uppercase text-green-600">{isService ? 'Margen por Servicio (USD)' : 'Ganancia por unidad (USD)'}</label>
                     <span className="text-xs font-black text-green-700 bg-green-50 px-2 py-0.5 rounded border border-green-200">
                       {(() => {
                         const cost = parseFloat(costUsdInput) || 0;
@@ -477,7 +584,7 @@ const ProductFormModal = memo(function ProductFormModal({
                       })()}
                     </span>
                   </div>
-                  <p className="text-[6px] text-green-600/80 mt-0.5">Ganancia en USD por cada unidad vendida (Precio Detal - Costo)</p>
+                  <p className="text-[6px] text-green-600/80 mt-0.5">{isService ? 'Diferencia entre precio de venta y costo operativo' : 'Ganancia en USD por cada unidad vendida (Precio Detal - Costo)'}</p>
                 </div>
                 
                 <div className="grid grid-cols-2 gap-2">
@@ -526,7 +633,7 @@ const ProductFormModal = memo(function ProductFormModal({
                     />
                   </div>
                   <div>
-                    <label className="text-[7px] font-bold uppercase">Precio Detal Bs (final)</label>
+                    <label className="text-[7px] font-bold uppercase">Venta Final Bs</label>
                     <Input 
                       type="text" 
                       inputMode="decimal" 
@@ -640,7 +747,7 @@ const ProductFormModal = memo(function ProductFormModal({
                       </span>
                     </div>
                   )}
-                  <div className="flex justify-between text-[10px] pt-1 border-t mt-1">
+                  <div className={cn("flex justify-between text-[10px] pt-1 border-t mt-1", isService && "hidden")}>
                     <span className="text-black/60">Precio Mayor USD:</span>
                     <span className="font-black text-secondary">{formatUsd(parseFloat(priceWholesaleInput) || 0)}</span>
                   </div>
@@ -655,7 +762,7 @@ const ProductFormModal = memo(function ProductFormModal({
           
           <div className="bg-[#F5F5F5] p-3 border-t flex justify-end gap-2 flex-shrink-0">
             <Button type="submit" disabled={isSubmitting} id="submit-product-btn" className="bg-primary text-black font-black px-6 h-8 text-xs">
-              {isSubmitting ? 'GUARDANDO...' : 'GUARDAR PRODUCTO'}
+              {isSubmitting ? 'GUARDANDO...' : isService ? 'GUARDAR SERVICIO' : 'GUARDAR PRODUCTO'}
             </Button>
           </div>
         </form>
