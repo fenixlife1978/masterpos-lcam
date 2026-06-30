@@ -1,0 +1,1765 @@
+"use client";
+
+import ProductFormModal from '@/components/inventory/ProductFormModal';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { usePOSState } from '@/hooks/use-pos-state';
+import { 
+  Plus, Search, Pencil, Trash2, X, 
+  Tag, Settings, History, RefreshCw, Save,
+  FileText, Share2, Printer, Percent, AlertTriangle,
+  DollarSign, Package, Layers, Boxes, PlusCircle,
+  FileSpreadsheet, TrendingUp, Calculator, Info, Calendar,
+  Lock, Unlock
+} from 'lucide-react';
+import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from '@/components/ui/table';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { useToast } from '@/hooks/use-toast';
+import { cn } from '@/lib/utils';
+import { Product, Category, AdminCode, KitComponent, getCategoryId, getCategoryName } from '@/lib/types';
+import syncService from '@/services/syncService';
+import * as XLSX from 'xlsx';
+import { formatBs, formatUsd, formatBsNumber, formatUsdNumber } from '@/lib/currency-formatter';
+
+// ✅ Redondeo a 2 decimales (comercial)
+const roundTo2 = (num: number): number => Math.round(num * 100) / 100;
+// ✅ Redondeo a 4 decimales (para costos)
+const roundTo4 = (num: number): number => Math.round(num * 10000) / 10000;
+
+const calculatePriceUsdFromCostAndProfit = (cost: number, profitPercent: number): number => {
+  if (cost <= 0) return 0;
+  if (profitPercent <= 0) return cost;
+  if (profitPercent >= 99.99) return cost * 100;
+  const marginDecimal = profitPercent / 100;
+  const priceUsd = cost / (1 - marginDecimal);
+  return roundTo2(priceUsd);
+};
+
+const calculateProfitFromCostAndPriceUsd = (cost: number, priceUsd: number): number => {
+  if (cost <= 0 || priceUsd <= 0) return 0;
+  if (priceUsd <= cost) return 0;
+  const profitPercent = (1 - (cost / priceUsd)) * 100;
+  if (profitPercent > 99.99) return 99.99;
+  return roundTo2(profitPercent);
+};
+
+const calculateProfitOnCost = (cost: number, priceUsd: number): number => {
+  if (cost <= 0 || priceUsd <= 0) return 0;
+  return ((priceUsd / cost) - 1) * 100;
+};
+
+const CACHE_KEYS = {
+  PRODUCTS: 'inventory_products_cache',
+  CATEGORIES: 'inventory_categories_cache',
+  DEPARTMENTS: 'inventory_departments_cache',
+  KARDEX: 'inventory_kardex_cache',
+  IVA_TYPE: 'product_iva_type',
+  IVA_PERCENTAGE: 'product_iva_percentage',
+};
+
+// ✅ INTERFAZ DE KARDEX CON TODOS LOS TIPOS SEGÚN types.ts
+interface KardexEntry {
+  id: string;
+  productId: number;
+  date: string;
+  type: 'entrada_compra' | 'salida_venta' | 'ajuste_positivo' | 'ajuste_negativo' | 'devolucion' | 'ajuste_inicial' | 'ajuste_manual' | 'colaboracion' | 'consumo' | 'compra' | 'venta';
+  quantity: number;
+  previousStock: number;
+  newStock: number;
+  reference: string;
+  note: string;
+  costUsd?: number;
+}
+
+const DEFAULT_CATEGORIES: Category[] = [
+  { id: 'Whisky', name: 'Whisky' },
+  { id: 'Ron', name: 'Ron' },
+  { id: 'Cerveza', name: 'Cerveza' },
+  { id: 'Vino', name: 'Vino' },
+  { id: 'Vodka', name: 'Vodka' },
+  { id: 'Tequila', name: 'Tequila' },
+  { id: 'Licor', name: 'Licor' },
+  { id: 'Gin', name: 'Gin' },
+  { id: 'Otro', name: 'Otro' }
+];
+const DEFAULT_DEPARTMENTS = ['Polar', 'Munchy', 'Otros'];
+
+type InventoryTab = 'catalogo' | 'reporte' | 'ajustes';
+
+// ✅ MAPEO UNIFICADO DE TIPOS DE KARDEX (sincronizado con syncService.ts)
+// Este mapeo convierte los tipos internos a los que se muestran en la UI
+const KARDEX_TYPE_MAP: Record<string, { label: string; badgeColor: string; isEntry: boolean; isExit: boolean }> = {
+  // ✅ ENTRADAS POR COMPRA
+  'entrada_compra': { label: 'COMPRA', badgeColor: 'bg-green-100 text-green-700', isEntry: true, isExit: false },
+  'compra': { label: 'COMPRA', badgeColor: 'bg-green-100 text-green-700', isEntry: true, isExit: false },
+  
+  // ✅ SALIDAS POR VENTA
+  'salida_venta': { label: 'VENTA', badgeColor: 'bg-red-100 text-red-700', isEntry: false, isExit: true },
+  'venta': { label: 'VENTA', badgeColor: 'bg-red-100 text-red-700', isEntry: false, isExit: true },
+  
+  // ✅ AJUSTES POSITIVOS (sobrantes)
+  'ajuste_positivo': { label: 'AJUSTE (+)', badgeColor: 'bg-emerald-100 text-emerald-700', isEntry: true, isExit: false },
+  
+  // ✅ AJUSTES NEGATIVOS (mermas, roturas)
+  'ajuste_negativo': { label: 'AJUSTE (-)', badgeColor: 'bg-rose-100 text-rose-700', isEntry: false, isExit: true },
+  
+  // ✅ AJUSTES MANUALES (pueden ser + o - según la cantidad)
+  'ajuste_manual': { label: 'AJUSTE', badgeColor: 'bg-orange-100 text-orange-700', isEntry: false, isExit: false },
+  
+  // ✅ INICIAL
+  'ajuste_inicial': { label: 'INICIAL', badgeColor: 'bg-blue-100 text-blue-700', isEntry: true, isExit: false },
+  
+  // ✅ DEVOLUCIONES
+  'devolucion': { label: 'DEVOLUCIÓN', badgeColor: 'bg-purple-100 text-purple-700', isEntry: true, isExit: false },
+  
+  // ✅ COLABORACIONES
+  'colaboracion': { label: 'COLABORACIÓN', badgeColor: 'bg-indigo-100 text-indigo-700', isEntry: false, isExit: false },
+  
+  // ✅ CONSUMOS
+  'consumo': { label: 'CONSUMO', badgeColor: 'bg-pink-100 text-pink-700', isEntry: false, isExit: false },
+};
+
+// ✅ Función para obtener el label y color de un tipo de kardex
+const getKardexTypeInfo = (type: string): { label: string; badgeColor: string; isEntry: boolean; isExit: boolean } => {
+  const info = KARDEX_TYPE_MAP[type];
+  if (info) return info;
+  // Fallback: mostrar el tipo original en mayúsculas como gris
+  return { label: type.toUpperCase(), badgeColor: 'bg-gray-100 text-gray-700', isEntry: false, isExit: false };
+};
+
+// ✅ Función para determinar si un movimiento es ENTRADA o SALIDA
+const getEntryExit = (entry: KardexEntry): { entrada: number; salida: number } => {
+  const absQty = Math.abs(entry.quantity);
+  const typeInfo = getKardexTypeInfo(entry.type);
+  
+  // Si el tipo tiene definido isEntry o isExit, usamos eso
+  if (typeInfo.isEntry) {
+    return { entrada: absQty, salida: 0 };
+  }
+  if (typeInfo.isExit) {
+    return { entrada: 0, salida: absQty };
+  }
+  
+  // Para 'ajuste_manual', 'colaboracion', 'consumo': la cantidad define el signo
+  if (entry.type === 'ajuste_manual' || entry.type === 'colaboracion' || entry.type === 'consumo') {
+    if (entry.quantity > 0) {
+      return { entrada: absQty, salida: 0 };
+    } else {
+      return { entrada: 0, salida: absQty };
+    }
+  }
+  
+  // Fallback: si la cantidad es positiva es entrada, negativa es salida
+  return {
+    entrada: entry.quantity > 0 ? absQty : 0,
+    salida: entry.quantity < 0 ? absQty : 0
+  };
+};
+
+export default function InventoryModule({ state }: { state: ReturnType<typeof usePOSState> }) {
+  const { toast } = useToast();
+  
+  const [activeTab, setActiveTab] = useState<InventoryTab>('catalogo');
+  const [search, setSearch] = useState('');
+  const [filterCategory, setFilterCategory] = useState<string>('all');
+  const [filterDepartment, setFilterDepartment] = useState<string>('all');
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [isAdding, setIsAdding] = useState(false);
+  const [viewingKardex, setViewingKardex] = useState<Product | null>(null);
+  const [viewingCostDetail, setViewingCostDetail] = useState<Product | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  
+  const [adjustingStock, setAdjustingStock] = useState<Product | null>(null);
+  const [adjustmentDelta, setAdjustmentDelta] = useState('');
+  const [adjustmentReason, setAdjustmentReason] = useState('');
+  const [showAuthCodeModal, setShowAuthCodeModal] = useState(false);
+  const [authCodeInput, setAuthCodeInput] = useState('');
+  const [pendingAdjustment, setPendingAdjustment] = useState<{ product: Product; delta: number; reason: string } | null>(null);
+  
+  const [adjustmentStartDate, setAdjustmentStartDate] = useState('');
+  const [adjustmentEndDate, setAdjustmentEndDate] = useState('');
+  const [dateRangePreset, setDateRangePreset] = useState<'day' | 'month' | 'year' | 'custom'>('day');
+  
+  const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
+  const [departments, setDepartments] = useState<string[]>(DEFAULT_DEPARTMENTS);
+  const [showCategoryModal, setShowCategoryModal] = useState(false);
+  const [showDepartmentModal, setShowDepartmentModal] = useState(false);
+  const [newCategory, setNewCategory] = useState('');
+  const [newDepartment, setNewDepartment] = useState('');
+  
+  const [ivaType, setIvaType] = useState<'con_iva' | 'sin_iva' | 'exento'>('con_iva');
+  const [ivaPercentage, setIvaPercentage] = useState(16);
+  
+  const products = state.products;
+  
+  const [kardexEntries, setKardexEntries] = useState<Record<number, KardexEntry[]>>({});
+  
+  const [formData, setFormData] = useState({
+    barcode: '',
+    name: '',
+    department: '',
+    category: 'Otro' as unknown as Category,
+    stock: 0,
+    minStock: 5,
+    costUsd: 0,
+    priceWholesale: 0,
+    priceCost: 0,
+  });
+  
+  const [costUsdInput, setCostUsdInput] = useState('');
+  const [priceWholesaleInput, setPriceWholesaleInput] = useState('');
+  const [priceCostInput, setPriceCostInput] = useState('');
+  const [stockInput, setStockInput] = useState('');
+  const [minStockInput, setMinStockInput] = useState('');
+  const [profitPercentInput, setProfitPercentInput] = useState('');
+  const [priceRetailBs, setPriceRetailBs] = useState('');
+  
+  const [isKit, setIsKit] = useState(false);
+  const [containerHasOwnStock, setKitHasOwnStock] = useState(false);
+  const [kitComponents, setKitComponents] = useState<KitComponent[]>([]);
+  const [searchChildProduct, setSearchChildProduct] = useState('');
+  const [selectedChildProduct, setSelectedChildProduct] = useState<Product | null>(null);
+  const [childQuantity, setChildQuantity] = useState('1');
+  const [hideChildResults, setHideChildResults] = useState(false);
+  
+  const [localPriceUsd, setLocalPriceUsd] = useState('');
+  
+  const isUpdatingRef = useRef(false);
+  
+  const formRef = useRef<HTMLFormElement>(null);
+  const inputRefs = useRef<(HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null)[]>([]);
+  
+  const handleFormKeyDown = (e: React.KeyboardEvent<HTMLFormElement>) => {
+    const target = e.target as HTMLElement;
+    const tagName = target.tagName.toLowerCase();
+    if (tagName !== 'input' && tagName !== 'select' && tagName !== 'textarea') return;
+    
+    const currentIndex = inputRefs.current.findIndex(ref => ref === target);
+    if (currentIndex === -1) return;
+    
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const nextIndex = currentIndex + 1;
+      if (nextIndex < inputRefs.current.length) {
+        const nextEl = inputRefs.current[nextIndex];
+        if (nextEl) {
+          nextEl.focus();
+          if (nextEl.tagName.toLowerCase() === 'select') {
+            (nextEl as HTMLSelectElement).size = 1;
+          }
+        }
+      } else {
+        const submitBtn = document.querySelector('#submit-product-btn') as HTMLButtonElement;
+        if (submitBtn) submitBtn.click();
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      const prevIndex = currentIndex - 1;
+      if (prevIndex >= 0) {
+        const prevEl = inputRefs.current[prevIndex];
+        if (prevEl) prevEl.focus();
+      }
+    }
+  };
+  
+  const isBarcodeDuplicado = (barcode: string, excludeId?: number): boolean => {
+    return false;
+  };
+  
+  const formatVenezuelaDateTime = (dateStr: string): string => {
+    try {
+      const date = new Date(dateStr);
+      if (isNaN(date.getTime())) return 'Fecha inválida';
+      return date.toLocaleString('es-VE', {
+        timeZone: 'America/Caracas',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true
+      });
+    } catch {
+      return dateStr;
+    }
+  };
+  
+  const childProductResults = useMemo(() => {
+    if (!searchChildProduct.trim() || hideChildResults) return [];
+    const q = searchChildProduct.toLowerCase();
+    return products.filter(p => 
+      p.id !== editingProduct?.id && 
+      (p.name.toLowerCase().includes(q) || (p.barcode || '').includes(q))
+    ).slice(0, 5);
+  }, [searchChildProduct, products, editingProduct, hideChildResults]);
+  
+  const addKitComponent = useCallback(() => {
+    if (!selectedChildProduct) return;
+    const qty = parseInt(childQuantity);
+    if (isNaN(qty) || qty <= 0) {
+      toast({ title: "Error", description: "Cantidad no válida", variant: "destructive" });
+      return;
+    }
+    if (kitComponents.some(c => c.productId === selectedChildProduct.id)) {
+      toast({ title: "Error", description: "El producto ya está en la lista", variant: "destructive" });
+      return;
+    }
+    const newComponent: KitComponent = {
+      productId: selectedChildProduct.id,
+      quantity: qty
+    };
+    setKitComponents(prev => [...prev, newComponent]);
+    setSelectedChildProduct(null);
+    setSearchChildProduct('');
+    setChildQuantity('1');
+    setHideChildResults(false);
+  }, [selectedChildProduct, childQuantity, kitComponents, toast]);
+  
+  const removeKitComponent = useCallback((productId: number) => {
+    setKitComponents(prev => prev.filter(c => c.productId !== productId));
+  }, []);
+  
+  useEffect(() => {
+    const cachedCategories = localStorage.getItem(CACHE_KEYS.CATEGORIES);
+    if (cachedCategories) {
+      try { 
+        const parsed = JSON.parse(cachedCategories);
+        // ✅ Normalizar: convertir strings a objetos Category
+        const normalized = Array.isArray(parsed) ? parsed.map((c: any) => typeof c === 'string' ? { id: c, name: c } : c) : [];
+        setCategories(normalized); 
+      } catch(e) {}
+    }
+    const cachedDepartments = localStorage.getItem(CACHE_KEYS.DEPARTMENTS);
+    if (cachedDepartments) {
+      try { setDepartments(JSON.parse(cachedDepartments)); } catch(e) {}
+    }
+    const cachedKardex = localStorage.getItem(CACHE_KEYS.KARDEX);
+    if (cachedKardex) {
+      try { setKardexEntries(JSON.parse(cachedKardex)); } catch(e) {}
+    }
+    
+    const loadSettings = async () => {
+      try {
+        const settings = await syncService.getGlobalSettings();
+        if (settings) {
+          if (settings.categories) {
+            const cats = Array.isArray(settings.categories) ? settings.categories : [];
+            // ✅ Normalizar: convertir strings a objetos Category
+            const normalized = cats.map((c: any) => typeof c === 'string' ? { id: c, name: c } : c);
+            setCategories(normalized as Category[]);
+          }
+          if (settings.departments) {
+            const depts = Array.isArray(settings.departments) ? settings.departments : [];
+            setDepartments(depts);
+          }
+          if (settings.defaultIvaPercentage) {
+            setIvaPercentage(settings.defaultIvaPercentage);
+          }
+        }
+      } catch (error) {
+        console.error('Error loading settings:', error);
+      }
+    };
+    loadSettings();
+    
+    // Cargar kardex desde syncService
+    const loadKardex = async () => {
+      try {
+        const entries = await syncService.getKardexEntries();
+        const grouped: Record<number, KardexEntry[]> = {};
+        entries.forEach(entry => {
+          const productIdNum = Number(entry.productId);
+          if (!grouped[productIdNum]) grouped[productIdNum] = [];
+          if (!grouped[productIdNum].some(e => e.id === entry.id)) {
+            grouped[productIdNum].push(entry as any);
+          }
+        });
+        Object.keys(grouped).forEach(productIdKey => {
+          const pid = Number(productIdKey);
+          const arr = grouped[pid];
+          if (arr && Array.isArray(arr)) {
+            arr.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+          }
+        });
+        setKardexEntries(grouped);
+        localStorage.setItem(CACHE_KEYS.KARDEX, JSON.stringify(grouped));
+      } catch (error) {
+        console.error('Error loading kardex:', error);
+      }
+    };
+    loadKardex();
+    
+    // Polling cada 30 segundos para actualizar kardex
+    const interval = setInterval(loadKardex, 30000);
+    
+    return () => clearInterval(interval);
+  }, []);
+  
+  const calculateRetailPriceFromCost = (cost: number, profitPercent: number, ivaPercent: number, applyIva: boolean): number => {
+    const basePrice = cost / (1 - profitPercent / 100);
+    const result = applyIva ? basePrice * (1 + ivaPercent / 100) : basePrice;
+    return roundTo2(result);
+  };
+  
+  const getProductMinStock = (product: Product) => product.minStock || 5;
+  
+  const exportKardexToPDF = (product: Product) => {
+    const entries = getKardexForProduct(Number(product.id));
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return;
+    
+    const html = `
+      <html>
+        <head>
+          <title>Kardex - ${product.name}</title>
+          <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 30px; color: #333; }
+            .header { text-align: center; border-bottom: 2px solid #1A2C4E; padding-bottom: 10px; margin-bottom: 20px; }
+            h1 { margin: 0; color: #1A2C4E; font-size: 20px; }
+            .info { margin-bottom: 20px; }
+            table { width: 100%; border-collapse: collapse; }
+            th { background-color: #1A2C4E; color: white; text-align: left; padding: 8px; font-size: 11px; }
+            td { padding: 6px 8px; border-bottom: 1px solid #ddd; font-size: 10px; }
+            .text-right { text-align: right; }
+            .text-center { text-align: center; }
+            .footer { margin-top: 30px; text-align: center; font-size: 9px; color: #999; border-top: 1px solid #eee; padding-top: 10px; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1>MasterPOS - Tarjeta Kardex</h1>
+          </div>
+          <div class="info">
+            <p><strong>Producto:</strong> ${product.name}</p>
+            <p><strong>Código:</strong> ${product.barcode}</p>
+            <p><strong>Categoría:</strong> ${typeof product.category === 'string' ? product.category : product.category?.name || 'Otro'}</p>
+            <p><strong>Stock Actual:</strong> ${product.stock} UDS</p>
+            <p><strong>Costo Promedio Actual:</strong> ${formatUsd(product.costUsd || 0, 4)}</p>
+            <p><strong>Fecha:</strong> ${new Date().toLocaleString('es-VE')}</p>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>FECHA</th>
+                <th>TIPO</th>
+                <th>DETALLE</th>
+                <th class="text-right">ENTRADA</th>
+                <th class="text-right">SALIDA</th>
+                <th class="text-right">SALDO</th>
+                <th class="text-right">COSTO PROM.</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${entries.map(entry => {
+                const { entrada, salida } = getEntryExit(entry);
+                const typeInfo = getKardexTypeInfo(entry.type);
+                let detalle = entry.reference || entry.note || '';
+                return `
+                  <tr>
+                    <td>${entry.date}</td>
+                    <td>${typeInfo.label}</td>
+                    <td>${detalle}</td>
+                    <td class="text-right">${entrada > 0 ? entrada : '-'}</td>
+                    <td class="text-right">${salida > 0 ? salida : '-'}</td>
+                    <td class="text-right">${entry.newStock}</td>
+                    <td class="text-right">${entry.costUsd ? formatUsdNumber(entry.costUsd, 4) : '-'}</td>
+                  </tr>
+                `;
+              }).join('')}
+              ${entries.length === 0 ? '<tr><td colspan="7" class="text-center">No hay movimientos registrados</td></tr>' : ''}
+            </tbody>
+          </table>
+          <div class="footer">Documento generado desde MasterPOS - Sistema de Punto de Venta</div>
+        </body>
+      </html>
+    `;
+    printWindow.document.write(html);
+    printWindow.document.close();
+    setTimeout(() => { printWindow.print(); printWindow.close(); }, 500);
+  };
+  
+  const shareKardexPDF = (product: Product) => {
+    if (navigator.share) {
+      const entries = getKardexForProduct(Number(product.id));
+      const content = `Kardex - ${product.name}\nStock Actual: ${product.stock} UDS\nCosto Promedio Actual: ${formatUsd(product.costUsd || 0, 4)}\n\nMovimientos:\n${entries.map(e => `${e.date} - ${getKardexTypeInfo(e.type).label}: cantidad ${e.quantity} uds (Saldo: ${e.newStock})`).join('\n')}`;
+      navigator.share({
+        title: `Kardex - ${product.name}`,
+        text: content,
+      }).catch(() => exportKardexToPDF(product));
+    } else {
+      exportKardexToPDF(product);
+    }
+  };
+  
+  const exportKardexToExcel = (product: Product) => {
+    const entries = getKardexForProduct(Number(product.id));
+    const data = entries.map(entry => {
+      const { entrada, salida } = getEntryExit(entry);
+      const typeInfo = getKardexTypeInfo(entry.type);
+      return {
+        FECHA: entry.date,
+        TIPO: typeInfo.label,
+        DETALLE: entry.reference || entry.note || '',
+        ENTRADA: entrada > 0 ? entrada : '-',
+        SALIDA: salida > 0 ? salida : '-',
+        SALDO: entry.newStock,
+        COSTO_PROMEDIO: entry.costUsd ? entry.costUsd : '-',
+      };
+    });
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, `Kardex_${product.name}`);
+    XLSX.writeFile(wb, `Kardex_${product.name}_${new Date().toISOString().split('T')[0]}.xlsx`);
+    toast({ title: "Exportado", description: "Kardex exportado a Excel correctamente" });
+  };
+  
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    const cost = parseFloat(costUsdInput) || 0;
+    let profitPercent = parseFloat(profitPercentInput) || 0;
+    
+    if (profitPercent > 100) {
+      profitPercent = 100;
+      setProfitPercentInput('100');
+      toast({ title: "Corrección automática", description: "El porcentaje de ganancia se ha ajustado al máximo permitido (100%)", variant: "default" });
+    }
+    
+    let priceUsd = parseFloat(localPriceUsd) || 0;
+    let priceBs = parseFloat(priceRetailBs) || 0;
+    
+    if (priceBs === 0 && priceUsd > 0) {
+      priceBs = priceUsd * state.exchangeRate;
+    } else if (priceBs > 0 && priceUsd === 0) {
+      priceUsd = priceBs / state.exchangeRate;
+    } else if (priceBs === 0 && priceUsd === 0 && cost > 0 && profitPercent > 0) {
+      priceUsd = calculatePriceUsdFromCostAndProfit(cost, profitPercent);
+      priceBs = priceUsd * state.exchangeRate;
+    }
+    
+    const productId = editingProduct?.id || Date.now();
+    
+    const productData: Product = {
+      id: productId,
+      barcode: formData.barcode || "",
+      name: formData.name,
+      department: formData.department || 'Otros',
+      category: formData.category,
+      stock: parseInt(stockInput) || 0,
+      minStock: parseInt(minStockInput) || 5,
+      costUsd: roundTo4(cost),
+      costBs: roundTo2(cost * state.exchangeRate),
+      profitPercent: profitPercent,
+      priceUsd: roundTo2(priceUsd),
+      priceBs: roundTo2(priceBs),
+      priceRetail: roundTo2(priceUsd),
+      priceWholesale: roundTo2(parseFloat(priceWholesaleInput) || 0),
+      priceCost: roundTo2(parseFloat(priceCostInput) || 0),
+      ivaType: ivaType,
+      ivaPercentage: ivaType === 'con_iva' ? ivaPercentage : 0,
+      isKit: isKit,
+      kitHasOwnStock: isKit ? containerHasOwnStock : false,
+      kitComponents: isKit && kitComponents.length > 0 ? kitComponents : [],
+      isPriceFixed: false
+    };
+    
+    if (editingProduct) {
+      await syncService.saveProduct(productData);
+      toast({ title: "Actualizado", description: "Producto modificado correctamente." });
+    } else {
+      await syncService.saveProduct(productData);
+      const kardexEntry: any = {
+        id: `${Date.now()}_${Math.random()}`,
+        productId: Number(productData.id),
+        date: new Date().toISOString(),
+        type: 'ajuste_inicial',
+        quantity: productData.stock,
+        previousStock: 0,
+        newStock: productData.stock,
+        reference: 'Creación de producto',
+        note: 'Stock inicial',
+        costUsd: productData.costUsd,
+      };
+      await syncService.saveKardexEntry(kardexEntry);
+      addKardexEntryLocal(Number(productData.id), kardexEntry);
+      await syncService.syncAllPending();
+      toast({ title: "Creado", description: "Nuevo producto registrado." });
+    }
+    setIsAdding(false);
+    setEditingProduct(null);
+    resetForm();
+  };
+  
+  const handleEdit = (p: Product) => {
+    setEditingProduct(p);
+    setFormData({
+      barcode: p.barcode || "",
+      name: p.name,
+      department: p.department || 'Otros',
+      category: p.category,
+      stock: p.stock,
+      minStock: p.minStock || 5,
+      costUsd: p.costUsd || 0,
+      priceWholesale: p.priceWholesale || 0,
+      priceCost: p.priceCost || 0,
+    });
+    setCostUsdInput(p.costUsd?.toString() || '');
+    setPriceWholesaleInput(p.priceWholesale?.toString() || '');
+    setPriceCostInput(p.priceCost?.toString() || '');
+    setStockInput(p.stock.toString());
+    setMinStockInput((p.minStock || 5).toString());
+    setProfitPercentInput((p.profitPercent || 0).toString());
+    setIvaType(p.ivaType || 'con_iva');
+    setIvaPercentage(p.ivaPercentage || 16);
+    setIsKit(p.isKit || false);
+    setKitHasOwnStock(p.kitHasOwnStock || false);
+    setKitComponents(p.kitComponents || []);
+    setPriceRetailBs(p.priceBs.toString());
+    setLocalPriceUsd(p.priceUsd.toString());
+    setIsAdding(true);
+  };
+  
+  const resetForm = () => {
+    setFormData({
+      barcode: '', name: '', department: 'Otros', category: 'Otro' as unknown as Category, stock: 0, minStock: 5,
+      costUsd: 0, priceWholesale: 0, priceCost: 0
+    });
+    setCostUsdInput('');
+    setPriceWholesaleInput('');
+    setPriceCostInput('');
+    setStockInput('');
+    setMinStockInput('');
+    setProfitPercentInput('');
+    setIvaType('con_iva');
+    setIvaPercentage(16);
+    setIsKit(false);
+    setKitHasOwnStock(false);
+    setKitComponents([]);
+    setSearchChildProduct('');
+    setSelectedChildProduct(null);
+    setChildQuantity('1');
+    setHideChildResults(false);
+    setPriceRetailBs('');
+    setLocalPriceUsd('');
+  };
+  
+  const addKardexEntryLocal = (productId: number, entry: KardexEntry) => {
+    setKardexEntries(prev => {
+      const existing = prev[productId] || [];
+      if (existing.some(e => e.id === entry.id)) {
+        return prev;
+      }
+      const updated = {
+        ...prev,
+        [productId]: [entry, ...existing]
+      };
+      localStorage.setItem(CACHE_KEYS.KARDEX, JSON.stringify(updated));
+      return updated;
+    });
+  };
+  
+  const getKardexForProduct = (productId: number): KardexEntry[] => {
+    return kardexEntries[productId] || [];
+  };
+  
+  const registerAdjustmentAccountingEntry = async (product: Product, delta: number, reason: string, exchangeRate: number) => {
+    const absDelta = Math.abs(delta);
+    const valorBs = absDelta * (product.costUsd || 0) * exchangeRate;
+    const entryType = delta > 0 ? 'ingreso' : 'egreso';
+    const category = 'Inventario';
+    const subcategory = delta > 0 ? 'Sobrante' : 'Merma / Rotura';
+    const concept = delta > 0 ? 'Ajuste positivo de inventario' : 'Ajuste negativo de inventario';
+    const description = `${reason} | Producto: ${product.name} (${product.barcode}) | Cantidad: ${absDelta} uds | Costo USD: ${formatUsd(product.costUsd || 0, 4)}`;
+    
+    const accountingEntry = {
+      id: String(Date.now()),
+      date: new Date().toISOString(),
+      type: entryType as any,
+      category,
+      subcategory,
+      concept,
+      description,
+      amount: roundTo2(valorBs),
+      referenceId: String(product.id),
+      referenceType: 'inventory_adjustment',
+      createdAt: new Date().toISOString(),
+    };
+    
+    await syncService.saveAccountingEntry(accountingEntry);
+    toast({ title: "Asiento contable registrado", description: `${entryType === 'ingreso' ? 'Ingreso' : 'Egreso'} por ${formatBs(valorBs)}` });
+  };
+  
+  const requestStockAdjust = (product: Product) => {
+    setAdjustingStock(product);
+    setAdjustmentDelta('');
+    setAdjustmentReason('');
+  };
+  
+  const confirmStockAdjustmentRequest = () => {
+    if (!adjustingStock) return;
+    
+    const rawDelta = adjustmentDelta.trim();
+    
+    if (!rawDelta) {
+      toast({ 
+        title: "Error", 
+        description: "Debe ingresar una cantidad con su signo (+ o -)", 
+        variant: "destructive" 
+      });
+      return;
+    }
+    
+    if (!rawDelta.startsWith('+') && !rawDelta.startsWith('-')) {
+      toast({ 
+        title: "Formato incorrecto", 
+        description: "Debe comenzar con + (para agregar) o - (para quitar). Ejemplo: +5 o -3", 
+        variant: "destructive" 
+      });
+      return;
+    }
+    
+    const numericPart = rawDelta.substring(1);
+    if (!/^\d+$/.test(numericPart)) {
+      toast({ 
+        title: "Formato incorrecto", 
+        description: "Después del signo solo debe haber números. Ejemplo: +5 o -3", 
+        variant: "destructive" 
+      });
+      return;
+    }
+    
+    const delta = parseInt(rawDelta);
+    
+    if (delta === 0) {
+      toast({ 
+        title: "Error", 
+        description: "La cantidad debe ser mayor que 0. Ejemplo: +5 o -3", 
+        variant: "destructive" 
+      });
+      return;
+    }
+    
+    const newQty = adjustingStock.stock + delta;
+    if (newQty < 0) {
+      toast({ 
+        title: "Error", 
+        description: "El stock no puede quedar negativo", 
+        variant: "destructive" 
+      });
+      return;
+    }
+    
+    if (!adjustmentReason.trim()) {
+      toast({ 
+        title: "Error", 
+        description: "Ingrese un motivo para el ajuste", 
+        variant: "destructive" 
+      });
+      return;
+    }
+    
+    setPendingAdjustment({
+      product: adjustingStock,
+      delta,
+      reason: adjustmentReason
+    });
+    setShowAuthCodeModal(true);
+  };
+  
+  const verifyAuthCode = async () => {
+    const adminCodeData = await syncService.getAdminCode();
+    // ✅ CORRECCIÓN QUIRÚRGICA: Forzar comparación de cadenas de texto para evitar fallos de tipo
+    if (adminCodeData && String(adminCodeData.code) === String(authCodeInput)) {
+      if (pendingAdjustment) {
+        const { product, delta, reason } = pendingAdjustment;
+        const previousStock = product.stock;
+        const newQty = previousStock + delta;
+        const updatedProduct = { ...product, stock: newQty };
+        
+        await syncService.saveProduct(updatedProduct);
+        
+        const kardexEntry: any = {
+          id: `${Date.now()}_${Math.random()}`,
+          productId: Number(product.id),
+          date: new Date().toISOString(),
+          type: 'ajuste_manual',
+          quantity: delta,
+          previousStock: previousStock,
+          newStock: newQty,
+          reference: `Ajuste manual - ${reason}`,
+          note: reason,
+          costUsd: product.costUsd,
+        };
+        await syncService.saveKardexEntry(kardexEntry);
+        addKardexEntryLocal(Number(product.id), kardexEntry);
+        await syncService.syncAllPending();
+        await registerAdjustmentAccountingEntry(product, delta, reason, state.exchangeRate);
+        toast({ title: "Ajuste Realizado", description: `${delta > 0 ? 'Agregadas' : 'Quitadas'} ${Math.abs(delta)} unidades. Nuevo stock: ${newQty}` });
+        setAdjustingStock(null);
+        setPendingAdjustment(null);
+        setAuthCodeInput('');
+        setShowAuthCodeModal(false);
+      }
+    } else {
+      toast({ title: "Acceso denegado", description: "Código de autorización incorrecto", variant: "destructive" });
+      setAuthCodeInput('');
+    }
+  };
+  
+  const [showGlobalIvaModal, setShowGlobalIvaModal] = useState(false);
+  const [newGlobalIva, setNewGlobalIva] = useState(16);
+  
+  const applyGlobalIva = async () => {
+    if (state.register?.isOpen) {
+      toast({ title: "Operación no permitida", description: "Debe cerrar la caja antes de cambiar el IVA global", variant: "destructive" });
+      return;
+    }
+    const updatedProducts = products.map(p => {
+      if (p.ivaType === 'con_iva') {
+        const newRetail = calculateRetailPriceFromCost(p.costUsd || 0, p.profitPercent || 0, newGlobalIva, true);
+        return { 
+          ...p, 
+          ivaPercentage: newGlobalIva, 
+          priceRetail: newRetail, 
+          priceUsd: newRetail, 
+          priceBs: roundTo2(newRetail * state.exchangeRate)
+        };
+      }
+      return p;
+    });
+    for (const prod of updatedProducts) {
+      await syncService.saveProduct(prod);
+    }
+    await syncService.saveGlobalSettings({ defaultIvaPercentage: newGlobalIva });
+    setIvaPercentage(newGlobalIva);
+    toast({ title: "IVA actualizado", description: `Nuevo porcentaje global: ${newGlobalIva}%` });
+    setShowGlobalIvaModal(false);
+  };
+  
+  const addCategory = () => {
+    if (!newCategory.trim()) return;
+    const cleanId = newCategory.trim().toLowerCase().replace(/\s+/g, '_');
+    if (categories.some(cat => cat.id === cleanId)) {
+      toast({ title: "Error", description: "Esta categoría ya existe", variant: "destructive" });
+      return;
+    }
+    const newCats = [...categories, { id: cleanId, name: newCategory.trim() }];
+    setCategories(newCats);
+    localStorage.setItem(CACHE_KEYS.CATEGORIES, JSON.stringify(newCats));
+    syncService.saveGlobalSettings({ categories: newCats, departments }).catch(console.error);
+    setNewCategory('');
+    setShowCategoryModal(false);
+  };
+  
+  const deleteCategory = (cat: Category) => {
+    if (cat.id === 'Otro') {
+      toast({ title: "No se puede eliminar", description: "La categoría 'Otro' es requerida", variant: "destructive" });
+      return;
+    }
+    if (products.some(p => p.category === cat.id)) {
+      toast({ title: "No se puede eliminar", description: "Hay productos asociados a esta categoría", variant: "destructive" });
+      return;
+    }
+    const newCats = categories.filter(c => c.id !== cat.id);
+    setCategories(newCats);
+    localStorage.setItem(CACHE_KEYS.CATEGORIES, JSON.stringify(newCats));
+    syncService.saveGlobalSettings({ categories: newCats, departments }).catch(console.error);
+  };
+  
+  const addDepartment = () => {
+    if (!newDepartment.trim()) return;
+    if (departments.includes(newDepartment.trim())) {
+      toast({ title: "Error", description: "Este departamento ya existe", variant: "destructive" });
+      return;
+    }
+    const newDepts = [...departments, newDepartment.trim()];
+    setDepartments(newDepts);
+    localStorage.setItem(CACHE_KEYS.DEPARTMENTS, JSON.stringify(newDepts));
+    syncService.saveGlobalSettings({ categories, departments: newDepts }).catch(console.error);
+    setNewDepartment('');
+    setShowDepartmentModal(false);
+  };
+  
+  const deleteDepartment = (dept: string) => {
+    if (dept === 'Otros') {
+      toast({ title: "No se puede eliminar", description: "El departamento 'Otros' es requerido", variant: "destructive" });
+      return;
+    }
+    if (products.some(p => p.department === dept)) {
+      toast({ title: "No se puede eliminar", description: "Hay productos asociados a este departamento", variant: "destructive" });
+      return;
+    }
+    const newDepts = departments.filter(d => d !== dept);
+    setDepartments(newDepts);
+    localStorage.setItem(CACHE_KEYS.DEPARTMENTS, JSON.stringify(newDepts));
+    syncService.saveGlobalSettings({ categories, departments: newDepts }).catch(console.error);
+  };
+  
+  const handleExportPDF = () => {
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return;
+    
+    const pdfProducts = products.filter(p => {
+      const matchSearch = p.name.toLowerCase().includes(search.toLowerCase()) || (p.barcode || '').includes(search);
+      const matchCat = filterCategory === 'all' || (getCategoryId(p.category) === filterCategory);
+      const matchDept = filterDepartment === 'all' || (p.department === filterDepartment);
+      return matchSearch && matchCat && matchDept;
+    });
+    
+    const html = `
+      <html>
+        <head>
+          <title>Reporte de Inventario - MasterPOS</title>
+          <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 30px; color: #333; }
+            .header { text-align: center; border-bottom: 2px solid #D4A017; padding-bottom: 10px; margin-bottom: 20px; }
+            h1 { margin: 0; color: #1A2C4E; font-size: 24px; text-transform: uppercase; }
+            .info { display: flex; justify-content: space-between; font-size: 10px; color: #666; margin-bottom: 20px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th { background-color: #1A2C4E; color: white; text-align: left; padding: 10px; font-size: 10px; text-transform: uppercase; }
+            td { padding: 8px 10px; border-bottom: 1px solid #eee; font-size: 10px; }
+            .text-right { text-align: right; }
+            .text-center { text-align: center; }
+            .bold { font-weight: bold; }
+            .low-stock { color: #e74c3c; font-weight: bold; }
+            .footer { margin-top: 30px; text-align: center; font-size: 9px; color: #999; border-top: 1px solid #eee; padding-top: 10px; }
+            .summary { margin-bottom: 15px; padding: 10px; background: #f9f9f9; border-radius: 8px; font-size: 11px; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1>LICOPOS ELITE - REPORTE DE INVENTARIO</h1>
+          </div>
+          <div class="info">
+            <span>FECHA: ${new Date().toLocaleString('es-VE')}</span>
+            <span>TASA BCV: ${formatBs(state.exchangeRate)}</span>
+          </div>
+          <div class="summary">
+            <span class="bold">RESUMEN:</span> ${pdfProducts.length} productos listados | 
+            Total ítems en stock: ${pdfProducts.reduce((s, p) => s + p.stock, 0)}
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>CÓDIGO</th>
+                <th>PRODUCTO</th>
+                <th>CATEGORÍA</th>
+                <th class="text-center">STOCK</th>
+                <th class="text-right">PRECIO USD</th>
+                <th class="text-right">PRECIO BS</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${pdfProducts.map(p => `
+                <tr>
+                  <td>${p.barcode || ""}</td>
+                  <td class="bold">${p.name}</td>
+                  <td>${getCategoryName(p.category)}</td>
+                  <td class="text-center ${p.stock <= getProductMinStock(p) ? 'low-stock' : ''}">${p.stock}</td>
+                  <td class="text-right">${formatUsd(p.priceUsd)}</td>
+                  <td class="text-right">${formatBs(p.priceBs)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+          <div class="footer">Este documento es una representación digital del inventario actual en el sistema MasterPOS.</div>
+        </body>
+      </html>
+    `;
+    printWindow.document.write(html);
+    printWindow.document.close();
+    setTimeout(() => { printWindow.print(); printWindow.close(); }, 500);
+  };
+  
+  const handleSharePDF = () => {
+    if (navigator.share) {
+      navigator.share({
+        title: 'Inventario MasterPOS',
+        text: `Reporte de inventario generado el ${new Date().toLocaleDateString()}. Total productos: ${filteredProducts.length}`,
+      }).catch(() => handleExportPDF());
+    } else {
+      handleExportPDF();
+    }
+  };
+  
+  const filteredProducts = useMemo(() => {
+    if (!search.trim()) return products;
+    
+    const term = search.trim();
+    const isNumericSearch = /^\d+$/.test(term);
+    
+    return products.filter(p => {
+      const matchesName = p.name.toLowerCase().includes(term.toLowerCase());
+      
+      let matchesBarcode = false;
+      if (isNumericSearch) {
+        const barcodeStr = (p.barcode || "").toString();
+        matchesBarcode = barcodeStr.startsWith(term);
+      } else {
+        matchesBarcode = (p.barcode || "").toLowerCase().includes(term.toLowerCase());
+      }
+      
+      const matchCat = filterCategory === 'all' || (getCategoryId(p.category) === filterCategory);
+      const matchDept = filterDepartment === 'all' || (p.department === filterDepartment);
+      
+      return (matchesName || matchesBarcode) && matchCat && matchDept;
+    }).sort((a, b) => {
+      if (isNumericSearch) {
+        const aStarts = (a.barcode || "").toString().startsWith(term);
+        const bStarts = (b.barcode || "").toString().startsWith(term);
+        if (aStarts && !bStarts) return -1;
+        if (!aStarts && bStarts) return 1;
+      }
+      return a.name.localeCompare(b.name);
+    });
+  }, [products, search, filterCategory, filterDepartment]);
+  
+  const reportProducts = useMemo(() => {
+    let filtered = [...products];
+    if (filterDepartment !== 'all') {
+      filtered = filtered.filter(p => p.department === filterDepartment);
+    }
+    if (filterCategory !== 'all') {
+      filtered = filtered.filter(p => getCategoryId(p.category) === filterCategory);
+    }
+    
+    if (search.trim()) {
+      const term = search.trim();
+      const isNumericSearch = /^\d+$/.test(term);
+      
+      filtered = filtered.filter(p => {
+        const matchesName = p.name.toLowerCase().includes(term.toLowerCase());
+        
+        let matchesBarcode = false;
+        const barcodeStr = (p.barcode || "").toString();
+        if (isNumericSearch) {
+          matchesBarcode = barcodeStr.startsWith(term);
+        } else {
+          matchesBarcode = barcodeStr.toLowerCase().includes(term.toLowerCase());
+        }
+        
+        return matchesName || matchesBarcode;
+      });
+      
+      if (isNumericSearch) {
+        filtered = filtered.sort((a, b) => {
+          const aStarts = (a.barcode || "").toString().startsWith(term);
+          const bStarts = (b.barcode || "").toString().startsWith(term);
+          if (aStarts && !bStarts) return -1;
+          if (!aStarts && bStarts) return 1;
+          return a.name.localeCompare(b.name);
+        });
+      } else {
+        filtered = filtered.sort((a, b) => a.name.localeCompare(b.name));
+      }
+    } else {
+      filtered = filtered.sort((a, b) => a.name.localeCompare(b.name));
+    }
+    
+    return filtered;
+  }, [products, filterDepartment, filterCategory, search]);
+  
+  const totalInventoryValueUsd = useMemo(() => {
+    return reportProducts.reduce((sum, p) => sum + ((p.costUsd || 0) * p.stock), 0);
+  }, [reportProducts]);
+  
+  const allAdjustments = useMemo(() => {
+    const adjustments: (KardexEntry & { productName: string; productBarcode: string; costBsValue: number })[] = [];
+    for (const product of products) {
+      const entries = getKardexForProduct(Number(product.id));
+      const productAdjustments = entries.filter(e => 
+        e.type === 'ajuste_manual' || 
+        e.type === 'ajuste_positivo' || 
+        e.type === 'ajuste_negativo'
+      );
+      for (const entry of productAdjustments) {
+        adjustments.push({
+          ...entry,
+          productName: product.name,
+          productBarcode: product.barcode || '',
+          costBsValue: (entry.costUsd || 0) * state.exchangeRate,
+        } as any);
+      }
+    }
+    adjustments.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    return adjustments;
+  }, [products, kardexEntries, state.exchangeRate]);
+  
+  const filteredAdjustments = useMemo(() => {
+    let start: Date | null = null;
+    let end: Date | null = null;
+    
+    const now = new Date();
+    switch (dateRangePreset) {
+      case 'day':
+        start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, -1);
+        break;
+      case 'month':
+        start = new Date(now.getFullYear(), now.getMonth(), 1);
+        end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+        break;
+      case 'year':
+        start = new Date(now.getFullYear(), 0, 1);
+        end = new Date(now.getFullYear(), 11, 31, 23, 59, 59);
+        break;
+      case 'custom':
+        if (adjustmentStartDate && adjustmentEndDate) {
+          start = new Date(adjustmentStartDate);
+          start.setHours(0,0,0,0);
+          end = new Date(adjustmentEndDate);
+          end.setHours(23,59,59,999);
+        }
+        break;
+    }
+    
+    if (!start) return allAdjustments;
+    
+    return allAdjustments.filter(adj => {
+      const adjDate = new Date(adj.date);
+      return adjDate >= start! && adjDate <= (end || new Date());
+    });
+  }, [allAdjustments, dateRangePreset, adjustmentStartDate, adjustmentEndDate]);
+  
+  const totalAdjustmentValue = useMemo(() => {
+    return filteredAdjustments.reduce((sum, adj) => {
+      const valorBs = Math.abs(adj.quantity) * (adj.costUsd || 0) * state.exchangeRate;
+      return sum + valorBs;
+    }, 0);
+  }, [filteredAdjustments, state.exchangeRate]);
+  
+  const totalAdjustmentUsd = useMemo(() => {
+    return filteredAdjustments.reduce((sum, adj) => {
+      return sum + (Math.abs(adj.quantity) * (adj.costUsd || 0));
+    }, 0);
+  }, [filteredAdjustments]);
+  
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await syncService.loadAllDataToCache();
+      toast({ title: "Actualizado", description: "Lista de productos actualizada correctamente." });
+    } catch (error) {
+      console.error("Error al refrescar productos:", error);
+      toast({ title: "Error", description: "No se pudieron actualizar los productos.", variant: "destructive" });
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+  
+  const handleOpenModal = () => {
+    resetForm();
+    setEditingProduct(null);
+    setIsAdding(true);
+  };
+  
+  const handleCloseModal = () => {
+    setIsAdding(false);
+    setEditingProduct(null);
+    resetForm();
+  };
+
+  const handleProductSave = useCallback(async (product: Product) => {
+    try {
+      if (editingProduct) {
+        await syncService.saveProduct(product);
+        toast({ title: "Actualizado", description: "Producto modificado correctamente." });
+      } else {
+        await syncService.saveProduct(product);
+        
+        const kardexEntry: any = {
+          id: `${Date.now()}_${Math.random()}`,
+          productId: product.id,
+          date: new Date().toISOString(),
+          type: 'ajuste_inicial',
+          quantity: product.stock,
+          previousStock: 0,
+          newStock: product.stock,
+          reference: 'Creación de producto',
+          note: 'Stock inicial',
+          costUsd: product.costUsd,
+        };
+        await syncService.saveKardexEntry(kardexEntry);
+        
+        setKardexEntries(prev => {
+          const existing = prev[product.id] || [];
+          const newEntry = {
+            id: kardexEntry.id,
+            productId: product.id,
+            date: kardexEntry.date,
+            type: kardexEntry.type as any,
+            quantity: kardexEntry.quantity,
+            previousStock: kardexEntry.previousStock,
+            newStock: kardexEntry.newStock,
+            reference: kardexEntry.reference,
+            note: kardexEntry.note,
+            costUsd: kardexEntry.costUsd,
+          };
+          return {
+            ...prev,
+            [product.id]: [newEntry, ...existing]
+          };
+        });
+        
+        toast({ title: "Creado", description: "Nuevo producto registrado con stock inicial." });
+      }
+      await syncService.loadAllDataToCache();
+    } catch (error) {
+      console.error('Error guardando producto:', error);
+      toast({ 
+        title: "Error", 
+        description: error instanceof Error ? error.message : "No se pudo guardar el producto", 
+        variant: "destructive" 
+      });
+    }
+  }, [editingProduct, toast]);
+
+  return (
+    <div className="h-full flex flex-col bg-background overflow-hidden">
+      <div className="flex justify-between items-center pt-3 px-6 flex-shrink-0">
+        <div>
+          <h2 className="text-xl font-headline font-black text-black">Catálogo de Inventario</h2>
+          <p className="text-xs text-black font-black">Consulta de existencias y gestión de catálogo</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <Button 
+            variant="outline" 
+            size="sm" 
+            onClick={() => setShowGlobalIvaModal(true)} 
+            className="h-8 text-[10px] font-black border-[#9E9E9E] text-black"
+          >
+            <Percent size={12} className="mr-1" /> Ajuste IVA Global
+          </Button>
+          <div className="bg-[#1A2C4E] px-3 py-1.5 rounded-xl text-white">
+            <span className="text-[9px] font-black uppercase opacity-60">Tasa Sistema</span>
+            <div className="text-base font-black text-primary">{formatBs(state.exchangeRate)}</div>
+          </div>
+        </div>
+      </div>
+      
+      <div className="flex gap-2 px-6 mt-2 border-b border-[#9E9E9E] flex-shrink-0">
+        <button
+          onClick={() => setActiveTab('catalogo')}
+          className={cn(
+            "flex items-center gap-2 px-4 py-2 rounded-t-lg font-black text-sm transition-all",
+            activeTab === 'catalogo'
+              ? "bg-white text-black border border-b-0 border-[#9E9E9E]"
+              : "text-black hover:bg-white/50"
+          )}
+        >
+          <Package size={14} />
+          Catálogo de Productos
+        </button>
+        <button
+          onClick={() => setActiveTab('reporte')}
+          className={cn(
+            "flex items-center gap-2 px-4 py-2 rounded-t-lg font-black text-sm transition-all",
+            activeTab === 'reporte'
+              ? "bg-white text-black border border-b-0 border-[#9E9E9E]"
+              : "text-black hover:bg-white/50"
+          )}
+        >
+          <FileSpreadsheet size={14} />
+          Reporte General de Inventario
+        </button>
+        <button
+          onClick={() => setActiveTab('ajustes')}
+          className={cn(
+            "flex items-center gap-2 px-4 py-2 rounded-t-lg font-black text-sm transition-all",
+            activeTab === 'ajustes'
+              ? "bg-white text-black border border-b-0 border-[#9E9E9E]"
+              : "text-black hover:bg-white/50"
+          )}
+        >
+          <History size={14} />
+          Historial de Ajustes
+        </button>
+      </div>
+      
+      {activeTab === 'catalogo' ? (
+        <div className="flex-1 flex flex-col overflow-hidden px-6 mt-4">
+          <div className="flex justify-between items-center mb-3 gap-2 flex-wrap flex-shrink-0">
+            <div className="relative flex-1 max-w-sm">
+              <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-black" />
+              <Input placeholder="Buscar producto..." className="pl-9 h-8 border-[#9E9E9E] text-xs text-black font-black" value={search} onChange={(e) => setSearch(e.target.value)} />
+            </div>
+            <div className="flex items-center gap-1">
+              <select value={filterDepartment} onChange={(e) => setFilterDepartment(e.target.value)} className="h-8 border rounded-lg px-2 text-xs font-black bg-white text-black">
+                <option value="all">📁 Todos los Deptos.</option>
+                {Array.isArray(departments) && departments.map((d, i) => <option key={`${d}-${i}`} value={d}>{d}</option>)}
+              </select>
+              <button onClick={() => setShowDepartmentModal(true)} className="h-8 w-8 border rounded-lg flex items-center justify-center hover:bg-gray-100"><Settings size={13} /></button>
+            </div>
+            <div className="flex items-center gap-1">
+              <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="h-8 border rounded-lg px-2 text-xs font-black bg-white text-black">
+                <option value="all">🏷️ Todas las Cats.</option>
+                {Array.isArray(categories) && categories.map((c: any, i) => {
+                  const id = typeof c === 'string' ? c : c.id;
+                  const name = typeof c === 'string' ? c : c.name;
+                  return <option key={`${id}-${i}`} value={id}>{name}</option>;
+                })}
+              </select>
+              <button onClick={() => setShowCategoryModal(true)} className="h-8 w-8 border rounded-lg flex items-center justify-center hover:bg-gray-100"><Settings size={13} /></button>
+            </div>
+            <div className="flex items-center gap-1 ml-auto">
+              <Button 
+                onClick={handleRefresh} 
+                variant="outline" 
+                className="h-8 text-[10px] font-black border-[#9E9E9E] text-black"
+                disabled={isRefreshing}
+              >
+                <RefreshCw size={12} className={cn("mr-1", isRefreshing && "animate-spin")} />
+                {isRefreshing ? "ACTUALIZANDO..." : "REFRESCAR"}
+              </Button>
+              <Button onClick={handleExportPDF} variant="outline" className="h-8 text-[10px] font-black border-[#9E9E9E] text-black"><Printer size={13} className="mr-1" /> EXPORTAR PDF</Button>
+              <Button onClick={handleSharePDF} variant="outline" className="h-8 text-[10px] font-black border-[#9E9E9E] text-black"><Share2 size={13} className="mr-1" /> COMPARTIR</Button>
+              <Button onClick={handleOpenModal} className="bg-primary text-black font-black h-8 text-[10px] px-3"><Plus size={13} className="mr-1" /> NUEVO PRODUCTO</Button>
+            </div>
+          </div>
+          <div className="bg-white border border-[#9E9E9E] rounded-xl overflow-hidden shadow-sm flex-1 flex flex-col min-h-0">
+            <div className="overflow-y-auto flex-1 scrollbar-thin">
+              <Table>
+                <TableHeader className="bg-[#E8E8E8] sticky top-0 z-10">
+                  <TableRow>
+                    <TableHead className="text-[9px] font-black uppercase text-black">Código</TableHead>
+                    <TableHead className="text-[9px] font-black uppercase text-black">Producto</TableHead>
+                    <TableHead className="text-[9px] font-black uppercase text-center text-black">Stock</TableHead>
+                    <TableHead className="text-[9px] font-black uppercase text-right text-black">Precio $</TableHead>
+                    <TableHead className="text-[9px] font-black uppercase text-right text-black">Precio Bs</TableHead>
+                    <TableHead className="text-[9px] font-black uppercase text-center text-black">Acciones</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {filteredProducts
+                    .filter((p) => p && p.id && p.name)
+                    .map((p, index) => (
+                      <TableRow key={`${p.id}-${index}`} className="border-b border-[#9E9E9E]/40 hover:bg-[#F5F5F5]">
+                        <TableCell className="font-mono text-[10px] text-black font-black">{p.barcode || ""}</TableCell>
+                        <TableCell>
+                          <p className="font-bold text-xs text-black">{p.name}</p>
+                          <p className="text-[8px] font-black text-black uppercase">{getCategoryName(p.category)} | {p.department || 'Sin Dept.'}</p>
+                        </TableCell>
+                        <TableCell className="text-center">
+                          <span className={cn("px-2 py-0.5 rounded-full text-[8px] font-black border", p.stock <= getProductMinStock(p) ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700")}>
+                            {p.stock} UDS
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right font-black text-xs text-secondary">{formatUsd(p.priceUsd)}</TableCell>
+                        <TableCell className="text-right font-black text-xs text-black">{formatBs(p.priceBs)}</TableCell>
+                        <TableCell className="text-center">
+                          <div className="flex justify-center gap-1">
+                            <button onClick={() => setViewingKardex(p)} className="h-6 w-6 rounded hover:bg-blue-100 text-blue-600" title="Ver Kardex"><History size={11} /></button>
+                            <button onClick={() => requestStockAdjust(p)} className="h-6 w-6 rounded hover:bg-amber-100 text-amber-600" title="Ajustar Stock"><RefreshCw size={11} /></button>
+                            <button onClick={() => handleEdit(p)} className="h-6 w-6 rounded hover:bg-gray-100 text-blue-600"><Pencil size={11} /></button>
+                            <button onClick={() => { if(confirm('¿Eliminar este producto?')) state.deleteProduct(p.id) }} className="h-6 w-6 rounded hover:bg-red-100 text-red-600"><Trash2 size={11} /></button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  {filteredProducts.filter((p) => p && p.id && p.name).length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={6} className="text-center py-10 text-black font-black italic">No se encontraron productos</TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+        </div>
+      ) : activeTab === 'reporte' ? (
+        <div className="flex-1 flex flex-col overflow-hidden px-6 mt-4">
+          <div className="flex justify-between items-center mb-3 gap-2 flex-wrap flex-shrink-0">
+            <div className="relative flex-1 max-w-sm">
+              <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-black" />
+              <Input placeholder="Buscar producto en el reporte..." className="pl-9 h-8 border-[#9E9E9E] text-xs text-black font-black" value={search} onChange={(e) => setSearch(e.target.value)} />
+            </div>
+            <div className="flex items-center gap-1">
+              <select value={filterDepartment} onChange={(e) => setFilterDepartment(e.target.value)} className="h-8 border rounded-lg px-2 text-xs font-black bg-white text-black"><option value="all">📁 Todos los Deptos.</option>{Array.isArray(departments) && departments.map((d, i) => <option key={`${d}-${i}`} value={d}>{d}</option>)}</select>
+            </div>
+            <div className="flex items-center gap-1">
+              <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="h-8 border rounded-lg px-2 text-xs font-black bg-white text-black">
+                <option value="all">🏷️ Todas las Cats.</option>
+                {Array.isArray(categories) && categories.map((c: any, i) => {
+                  const id = typeof c === 'string' ? c : c.id;
+                  const name = typeof c === 'string' ? c : c.name;
+                  return <option key={`${id}-${i}`} value={id}>{name}</option>;
+                })}
+              </select>
+            </div>
+            <div className="flex items-center gap-1 ml-auto">
+              <Button onClick={handleExportPDF} variant="outline" className="h-8 text-[10px] font-black border-[#9E9E9E] text-black"><Printer size={13} className="mr-1" /> EXPORTAR PDF</Button>
+            </div>
+          </div>
+          <div className="bg-white border border-[#9E9E9E] rounded-xl overflow-hidden shadow-sm flex-1 flex flex-col min-h-0">
+            <div className="overflow-y-auto flex-1 scrollbar-thin">
+              <Table>
+                <TableHeader className="bg-[#1A2C4E] sticky top-0 z-10">
+                  <TableRow className="border-b border-white/20">
+                    <TableHead className="text-[9px] font-black uppercase text-white">Código</TableHead>
+                    <TableHead className="text-[9px] font-black uppercase text-white">Producto</TableHead>
+                    <TableHead className="text-[9px] font-black uppercase text-white text-right">Costo $</TableHead>
+                    <TableHead className="text-[9px] font-black uppercase text-white text-center">Stock</TableHead>
+                    <TableHead className="text-[9px] font-black uppercase text-white text-right">Valor Inventario $</TableHead>
+                    <TableHead className="text-[9px] font-black uppercase text-white text-center">Acciones</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {reportProducts
+                    .filter(p => p && p.id && p.name)
+                    .filter(p => !search || p.name.toLowerCase().includes(search.toLowerCase()) || (p.barcode || "").includes(search))
+                    .map((p, index) => (
+                      <TableRow key={`${p.id}-${index}`} className="border-b border-[#9E9E9E]/30 hover:bg-[#F5F5F5] py-1">
+                        <TableCell className="font-mono text-[9px] text-black font-black py-1.5">{p.barcode || ""}</TableCell>
+                        <TableCell className="py-1.5">
+                          <p className="font-bold text-xs text-black">{p.name}</p>
+                          <p className="text-[7px] font-black text-black uppercase">{getCategoryName(p.category)} | {p.department || 'Sin Dept.'}</p>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-[10px] font-bold text-black py-1.5">{formatUsd(p.costUsd || 0, 4)}</TableCell>
+                        <TableCell className="text-center py-1.5"><span className={cn("px-2 py-0.5 rounded-full text-[8px] font-black", p.stock <= getProductMinStock(p) ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700")}>{p.stock} UDS</span></TableCell>
+                        <TableCell className="text-right font-mono text-[10px] font-black text-black py-1.5">{formatUsd((p.costUsd || 0) * p.stock)}</TableCell>
+                        <TableCell className="text-center py-1.5">
+                          <div className="flex justify-center gap-1.5">
+                            <button onClick={() => setViewingCostDetail(p)} className="h-7 w-7 rounded hover:bg-blue-100 text-blue-600 flex items-center justify-center" title="Ver detalle de costo"><Calculator size={14} /></button>
+                            <button onClick={() => setViewingKardex(p)} className="h-7 w-7 rounded hover:bg-blue-100 text-blue-600 flex items-center justify-center" title="Ver Kardex"><History size={14} /></button>
+                            <button onClick={() => requestStockAdjust(p)} className="h-7 w-7 rounded hover:bg-amber-100 text-amber-600 flex items-center justify-center" title="Ajustar Stock"><RefreshCw size={14} /></button>
+                            <button onClick={() => handleEdit(p)} className="h-7 w-7 rounded hover:bg-gray-100 text-blue-600 flex items-center justify-center"><Pencil size={14} /></button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  {reportProducts.filter(p => p && p.id && p.name).length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={6} className="text-center py-10 text-black font-black italic">No hay productos para mostrar con los filtros seleccionados</TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+                <tfoot className="bg-[#F0F0F0] border-t-2 border-[#9E9E9E]">
+                  <tr className="font-black">
+                    <td colSpan={4} className="p-3 text-right text-lg font-black">TOTAL VALOR INVENTARIO:</td>
+                    <td className="p-3 text-right text-xl font-black text-primary">{formatUsd(totalInventoryValueUsd)}</td>
+                  </tr>
+                </tfoot>
+              </Table>
+            </div>
+          </div>
+          <div className="mt-3 bg-gray-100 rounded-lg p-2 flex justify-between items-center flex-shrink-0">
+            <div className="text-[9px] text-black font-black"><span className="font-bold">{reportProducts.filter(p => !search || p.name.toLowerCase().includes(search.toLowerCase()) || (p.barcode || "").includes(search)).length}</span> productos mostrados</div>
+            <div className="text-[9px] text-black font-black">Valor total inventario: <span className="font-bold text-black">{formatUsd(reportProducts.reduce((sum, p) => sum + ((p.costUsd || 0) * p.stock), 0))}</span></div>
+          </div>
+        </div>
+      ) : (
+        <div className="flex-1 flex flex-col overflow-hidden px-6 mt-4">
+          <div className="flex justify-between items-center mb-3 gap-2 flex-wrap flex-shrink-0">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-black uppercase text-black">Filtrar por:</span>
+              <div className="flex gap-1">
+                <button onClick={() => setDateRangePreset('day')} className={cn("px-2 py-1 text-[10px] font-black rounded border", dateRangePreset === 'day' ? "bg-primary text-black" : "bg-white text-black")}>Hoy</button>
+                <button onClick={() => setDateRangePreset('month')} className={cn("px-2 py-1 text-[10px] font-black rounded border", dateRangePreset === 'month' ? "bg-primary text-black" : "bg-white text-black")}>Este Mes</button>
+                <button onClick={() => setDateRangePreset('year')} className={cn("px-2 py-1 text-[10px] font-black rounded border", dateRangePreset === 'year' ? "bg-primary text-black" : "bg-white text-black")}>Este Año</button>
+                <button onClick={() => setDateRangePreset('custom')} className={cn("px-2 py-1 text-[10px] font-black rounded border", dateRangePreset === 'custom' ? "bg-primary text-black" : "bg-white text-black")}>Personalizado</button>
+              </div>
+            </div>
+            {dateRangePreset === 'custom' && (
+              <div className="flex items-center gap-2">
+                <Input type="date" value={adjustmentStartDate} onChange={e => setAdjustmentStartDate(e.target.value)} className="h-7 text-xs w-36 font-black" />
+                <span className="text-xs font-black">-</span>
+                <Input type="date" value={adjustmentEndDate} onChange={e => setAdjustmentEndDate(e.target.value)} className="h-7 text-xs w-36 font-black" />
+              </div>
+            )}
+            <div className="ml-auto text-xs bg-gray-100 px-3 py-1 rounded-full font-black text-black">
+              Total ajustes: <span className="font-black">{formatUsd(totalAdjustmentUsd)}</span>
+            </div>
+          </div>
+          
+          <div className="bg-white border border-[#9E9E9E] rounded-xl overflow-hidden shadow-sm flex-1 flex flex-col min-h-0">
+            <div className="overflow-x-auto flex-1">
+              <table className="w-full text-xs">
+                <thead className="bg-gray-100 sticky top-0">
+                  <tr>
+                    <th className="p-2 text-left font-black text-black">Fecha</th>
+                    <th className="p-2 text-left font-black text-black">Producto</th>
+                    <th className="p-2 text-center font-black text-black">Tipo</th>
+                    <th className="p-2 text-right font-black text-black">Cantidad</th>
+                    <th className="p-2 text-right font-black text-black">Costo USD</th>
+                    <th className="p-2 text-right font-black text-black">Valor Ajuste (Bs)</th>
+                    <th className="p-2 text-left font-black text-black">Motivo</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredAdjustments.map((adj, idx) => (
+                    <tr key={`${adj.id}_${idx}`} className="border-b border-gray-100 hover:bg-gray-50">
+                      <td className="p-2 whitespace-nowrap text-[11px] font-mono font-black text-black">{formatVenezuelaDateTime(adj.date)}</td>
+                      <td className="p-2">
+                        <div className="font-black text-black">{adj.productName}</div>
+                        <div className="text-[9px] text-black font-black">{adj.productBarcode}</div>
+                      </td>
+                      <td className="p-2 text-center">
+                        <span className={cn("px-2 py-0.5 rounded-full text-[9px] font-black", adj.quantity > 0 ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700")}>
+                          {adj.quantity > 0 ? "INGRESO" : "EGRESO"}
+                        </span>
+                      </td>
+                      <td className="p-2 text-right font-mono font-black text-black">{Math.abs(adj.quantity)} uds</td>
+                      <td className="p-2 text-right font-mono font-black text-black">{formatUsd(adj.costUsd || 0, 4)}</td>
+                      <td className="p-2 text-right font-mono font-black text-black">{formatBs(Math.abs(adj.quantity) * (adj.costUsd || 0) * state.exchangeRate)}</td>
+                      <td className="p-2 text-left max-w-[200px] truncate font-black text-black" title={adj.note || adj.reference}>{adj.note || adj.reference}</td>
+                    </tr>
+                  ))}
+                  {filteredAdjustments.length === 0 && (
+                    <tr><td colSpan={7} className="p-4 text-center text-black font-black italic">No hay ajustes manuales en el período seleccionado</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="bg-gray-50 p-2 border-t text-[10px] text-black font-black flex justify-between">
+              <span>{filteredAdjustments.length} registros</span>
+              <span>Los ajustes generan automáticamente asientos contables (ingresos/egresos)</span>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {viewingCostDetail && (
+        <Dialog open={true} onOpenChange={() => setViewingCostDetail(null)}>
+          <DialogContent className="bg-white border border-[#9E9E9E] text-black max-w-lg p-0 rounded-xl shadow-xl max-h-[85vh] flex flex-col">
+            <DialogHeader className="bg-[#1A2C4E] p-3 text-white rounded-t-xl flex-shrink-0">
+              <div className="flex justify-between items-center">
+                <DialogTitle className="text-sm font-black flex items-center gap-2"><Calculator size={14} /> Detalle de Costo - CPP</DialogTitle>
+                <button onClick={() => setViewingCostDetail(null)} className="text-white/60 hover:text-white"><X size={16} /></button>
+              </div>
+            </DialogHeader>
+            <div className="flex-1 overflow-y-auto p-4">
+              <div className="text-center mb-4"><p className="font-black text-base text-black">{viewingCostDetail.name}</p><p className="text-[9px] text-black font-black">{viewingCostDetail.barcode}</p></div>
+              <div className="space-y-3">
+                <div className="bg-gray-50 rounded-lg p-3"><div className="flex justify-between items-center"><span className="text-[10px] font-black uppercase text-black">Costo Actual (Ponderado)</span><span className="font-mono text-lg font-black text-blue-600">{formatUsd(viewingCostDetail.costUsd || 0, 4)}</span></div></div>
+                <div className="border-t border-gray-200 pt-3">
+                  <p className="text-[9px] font-black uppercase text-black mb-2">Historial de Costos (últimas compras)</p>
+                  <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                    {(() => {
+                      const entries = kardexEntries[Number(viewingCostDetail.id)] || [];
+                      const purchaseEntries = entries.filter(e => e.type === 'entrada_compra' || e.type === 'compra').sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+                      if (purchaseEntries.length === 0) return <p className="text-[9px] text-black font-black italic text-center">No hay registros de compras previas</p>;
+                      return purchaseEntries.map((entry, idx) => {
+                        const previousEntry = purchaseEntries[idx + 1];
+                        const previousCost = previousEntry?.costUsd;
+                        const newCost = entry.costUsd;
+                        return (
+                          <div key={idx} className="border border-gray-200 rounded-lg p-2 bg-white">
+                            <div className="flex justify-between items-center text-[10px]"><span className="text-black font-black">{new Date(entry.date).toLocaleDateString('es-VE')}</span><span className="font-mono font-black text-blue-600">{formatUsd(newCost || 0, 4)}</span><span className="text-[8px] text-black font-black">x{entry.quantity} uds</span></div>
+                            {previousCost !== undefined && (<div className="flex justify-between items-center text-[9px] mt-1 pt-1 border-t border-gray-100"><span className="text-black font-black">Costo anterior:</span><span className="font-mono text-black font-black">{formatUsd(previousCost, 4)}</span><span className="text-black font-black">→</span><span className="font-mono font-bold text-green-600">{formatUsd(newCost || 0, 4)}</span></div>)}
+                            {idx === 0 && purchaseEntries.length > 1 && (<div className="flex justify-between items-center text-[9px] mt-1 pt-1 border-t border-blue-100"><span className="text-blue-600 font-black">📊 Variación:</span>{(() => { const prev = purchaseEntries[1]?.costUsd; if (prev && newCost) { const variation = ((newCost - prev) / prev) * 100; return <span className={cn("font-mono font-black", variation >= 0 ? "text-red-600" : "text-green-600")}>{variation >= 0 ? `+${variation.toFixed(2)}%` : `${variation.toFixed(2)}%`}</span> } return null; })()}</div>)}
+                          </div>
+                        );
+                      });
+                    })()}
+                  </div>
+                </div>
+                <div className="bg-amber-50 rounded-lg p-2 mt-2 border border-amber-200 flex-shrink-0"><p className="text-[7px] text-amber-700 text-center font-black">El costo actual se calcula mediante <strong>Promedio Ponderado (CPP)</strong><br />Fórmula: ((Stock Ant × Costo Ant) + (Cantidad Nueva × Costo Nuevo)) / Stock Total</p></div>
+              </div>
+            </div>
+            <div className="bg-gray-50 p-2 border-t flex justify-end flex-shrink-0"><Button onClick={() => setViewingCostDetail(null)} variant="ghost" size="sm" className="h-7 text-xs font-black text-black">CERRAR</Button></div>
+          </DialogContent>
+        </Dialog>
+      )}
+      
+      {viewingKardex && (
+        <Dialog open={true} onOpenChange={() => setViewingKardex(null)}>
+          <DialogContent className="bg-white border border-[#9E9E9E] text-black max-w-6xl w-[95vw] p-0 overflow-hidden rounded-xl shadow-xl max-h-[90vh] flex flex-col">
+            <DialogHeader className="bg-[#1A2C4E] p-4 text-white sticky top-0 z-10">
+              <div className="flex justify-between items-center">
+                <div>
+                  <DialogTitle className="text-xl font-black flex items-center gap-2"><History size={20} /> Tarjeta Kardex</DialogTitle>
+                  <p className="text-sm font-black opacity-90 mt-1">{viewingKardex.name}</p>
+                  <p className="text-[11px] opacity-70 font-mono font-black">{viewingKardex.barcode}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button onClick={() => exportKardexToPDF(viewingKardex)} className="text-white/70 hover:text-white p-2 transition-colors rounded-lg hover:bg-white/10" title="Exportar a PDF"><Printer size={18} /></button>
+                  <button onClick={() => shareKardexPDF(viewingKardex)} className="text-white/70 hover:text-white p-2 transition-colors rounded-lg hover:bg-white/10" title="Compartir PDF"><Share2 size={18} /></button>
+                  <button onClick={() => exportKardexToExcel(viewingKardex)} className="text-white/70 hover:text-white p-2 transition-colors rounded-lg hover:bg-white/10" title="Exportar a Excel"><FileSpreadsheet size={18} /></button>
+                  <button onClick={() => setViewingKardex(null)} className="text-white/70 hover:text-white p-2 transition-colors rounded-lg hover:bg-white/10"><X size={20} /></button>
+                </div>
+              </div>
+            </DialogHeader>
+            <div className="p-5 overflow-y-auto flex-1 bg-gray-50">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-xl p-4 shadow-sm border border-green-200"><p className="text-[11px] font-black uppercase text-green-700 tracking-wider">📦 STOCK ACTUAL</p><p className={cn("text-3xl font-black mt-1", viewingKardex.stock === 0 ? "text-red-600" : "text-green-700")}>{viewingKardex.stock.toLocaleString('es-VE')} <span className="text-base font-black">UDS</span></p></div>
+                <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-4 shadow-sm border border-blue-200"><p className="text-[11px] font-black uppercase text-blue-700 tracking-wider">💰 COSTO PROMEDIO ACTUAL</p><p className="text-3xl font-black text-blue-700 mt-1">{formatUsd(viewingKardex.costUsd || 0, 4)}</p></div>
+                <div className="bg-gradient-to-br from-amber-50 to-amber-100 rounded-xl p-4 shadow-sm border border-amber-200"><p className="text-[11px] font-black uppercase text-amber-700 tracking-wider">💵 VALOR INVENTARIO</p><p className="text-3xl font-black text-amber-700 mt-1">{formatUsd((viewingKardex.costUsd || 0) * viewingKardex.stock)}</p></div>
+              </div>
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left min-w-[900px]">
+                    <thead className="bg-gray-100 border-b-2 border-gray-300">
+                      <tr>
+                        <th className="p-3 text-[12px] font-black uppercase text-black whitespace-nowrap">FECHA</th>
+                        <th className="p-3 text-[12px] font-black uppercase text-black whitespace-nowrap">TIPO</th>
+                        <th className="p-3 text-[12px] font-black uppercase text-black whitespace-nowrap">DETALLE</th>
+                        <th className="p-3 text-[12px] font-black uppercase text-black text-right whitespace-nowrap">ENTRADA</th>
+                        <th className="p-3 text-[12px] font-black uppercase text-black text-right whitespace-nowrap">SALIDA</th>
+                        <th className="p-3 text-[12px] font-black uppercase text-black text-right whitespace-nowrap">SALDO</th>
+                        <th className="p-3 text-[12px] font-black uppercase text-black text-right whitespace-nowrap">COSTO PROM.</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {(() => {
+                        const entries = getKardexForProduct(Number(viewingKardex.id));
+                        const sortedEntries = [...entries].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+                        return sortedEntries.map((entry, idx) => {
+                          const { entrada, salida } = getEntryExit(entry as any);
+                          const typeInfo = getKardexTypeInfo(entry.type);
+                          let detalle = entry.reference || entry.note || '';
+                          let formattedDate = '';
+                          try {
+                            const dateObj = new Date(entry.date);
+                            if (!isNaN(dateObj.getTime())) formattedDate = dateObj.toLocaleString('es-VE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+                            else formattedDate = entry.date;
+                          } catch(e) { formattedDate = entry.date; }
+                          return (
+                            <tr key={`${entry.id}_${idx}`} className="hover:bg-gray-50 transition-colors">
+                              <td className="p-3 font-mono text-[12px] font-black text-black whitespace-nowrap">{formattedDate}</td>
+                              <td className="p-3 whitespace-nowrap"><span className={cn("px-2 py-1 rounded-full text-[10px] font-black", typeInfo.badgeColor)}>{typeInfo.label}</span></td>
+                              <td className="p-3 text-[11px] text-black font-black max-w-[250px] truncate whitespace-nowrap">{detalle}</td>
+                              <td className="p-3 text-right font-mono text-[13px] font-black text-green-600 whitespace-nowrap">{entrada > 0 ? entrada.toLocaleString('es-VE') : '-'}</td>
+                              <td className="p-3 text-right font-mono text-[13px] font-black text-red-600 whitespace-nowrap">{salida > 0 ? salida.toLocaleString('es-VE') : '-'}</td>
+                              <td className="p-3 text-right font-mono text-[13px] font-black text-blue-700 whitespace-nowrap">{entry.newStock.toLocaleString('es-VE')}</td>
+                              <td className="p-3 text-right font-mono text-[12px] font-black text-black whitespace-nowrap">{entry.costUsd ? formatUsd(entry.costUsd, 4) : '-'}</td>
+                            </tr>
+                          );
+                        });
+                      })()}
+                      {(() => {
+                        const entries = getKardexForProduct(Number(viewingKardex.id));
+                        return entries.length === 0 && (
+                          <tr><td colSpan={7} className="text-center py-10 text-black font-black italic text-sm">No hay movimientos registrados</td></tr>
+                        );
+                      })()}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="mt-4 text-[10px] text-black font-black text-center border-t pt-3">Los movimientos reflejan el historial completo de inventario del producto</div>
+            </div>
+            <div className="bg-gray-100 p-3 border-t flex justify-end"><Button onClick={() => setViewingKardex(null)} variant="ghost" className="text-sm font-black px-5 text-black">CERRAR</Button></div>
+          </DialogContent>
+        </Dialog>
+      )}
+      
+      <Dialog open={!!adjustingStock} onOpenChange={() => setAdjustingStock(null)}>
+        <DialogContent className="bg-white border border-[#9E9E9E] text-black max-w-md p-0 rounded-xl">
+          <DialogHeader className="bg-amber-500 p-3 text-white rounded-t-xl">
+            <div className="flex justify-between items-center">
+              <DialogTitle className="text-sm font-black">Ajustar Stock</DialogTitle>
+              <button onClick={() => setAdjustingStock(null)} className="text-white/70 hover:text-white">
+                <X size={16} />
+              </button>
+            </div>
+          </DialogHeader>
+          <div className="p-4 space-y-3">
+            <div>
+              <label className="text-[9px] font-black uppercase block mb-1">
+                Cantidad a ajustar (negativa para quitar, positiva para agregar)
+              </label>
+              <Input 
+                type="text" 
+                value={adjustmentDelta} 
+                onChange={(e) => setAdjustmentDelta(e.target.value)} 
+                className="text-sm font-mono font-black text-black" 
+                placeholder="Ej: +5 o -3" 
+              />
+              {adjustingStock && (
+                <p className="text-[8px] text-black font-black mt-1">
+                  Stock actual: {adjustingStock.stock} uds → Nuevo stock: {
+                    (() => {
+                      const raw = adjustmentDelta.trim();
+                      if (raw.startsWith('+') || raw.startsWith('-')) {
+                        const num = parseInt(raw);
+                        if (!isNaN(num)) {
+                          return adjustingStock.stock + num;
+                        }
+                      }
+                      return adjustingStock.stock;
+                    })()
+                  } uds
+                </p>
+              )}
+            </div>
+            <div>
+              <label className="text-[9px] font-black uppercase block mb-1">Motivo del Ajuste</label>
+              <textarea 
+                value={adjustmentReason} 
+                onChange={(e) => setAdjustmentReason(e.target.value)} 
+                rows={2} 
+                className="w-full border rounded-lg px-2 py-1 text-xs resize-none font-black text-black" 
+                placeholder="Ej: Rotura, merma, inventario físico, sobrante..." 
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setAdjustingStock(null)} className="font-black text-black">CANCELAR</Button>
+              <Button onClick={confirmStockAdjustmentRequest} className="bg-amber-500 text-white font-black h-7 text-xs px-4">
+                SOLICITAR AJUSTE
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+      
+      <Dialog open={showAuthCodeModal} onOpenChange={setShowAuthCodeModal}>
+        <DialogContent className="bg-white max-md p-0 rounded-xl">
+          <DialogHeader className="bg-red-600 p-3 text-white rounded-t-xl"><DialogTitle className="text-sm font-black flex items-center gap-2"><AlertTriangle size={14} /> Autorización requerida</DialogTitle></DialogHeader>
+          <div className="p-4 space-y-3"><p className="text-xs text-black font-black">Ingrese el código de autorización para realizar este ajuste de inventario:</p><Input type="password" placeholder="Código de seguridad" value={authCodeInput} onChange={(e) => setAuthCodeInput(e.target.value)} className="font-mono text-center text-base font-black text-black" autoFocus /><div className="flex justify-end gap-2"><Button variant="ghost" onClick={() => setShowAuthCodeModal(false)} className="font-black text-black">Cancelar</Button><Button onClick={verifyAuthCode} className="bg-red-600 text-white font-black">Verificar y Ajustar</Button></div></div>
+        </DialogContent>
+      </Dialog>
+      
+      <Dialog open={showCategoryModal} onOpenChange={setShowCategoryModal}>
+        <DialogContent className="bg-white max-w-md p-0 rounded-xl">
+          <DialogHeader className="bg-[#1A2C4E] p-3 text-white rounded-t-xl"><DialogTitle className="text-xs font-black">🏷️ Gestionar Categorías</DialogTitle></DialogHeader>
+          <div className="p-3">
+            <div className="flex gap-2 mb-3"><Input placeholder="Nueva categoría..." value={newCategory} onChange={(e) => setNewCategory(e.target.value)} className="flex-1 h-7 text-xs font-black text-black" onKeyPress={(e) => e.key === 'Enter' && addCategory()} /><Button onClick={addCategory} className="bg-primary text-black h-7 text-xs px-3 font-black">AGREGAR</Button></div>
+            <div className="max-h-52 overflow-y-auto border rounded-lg divide-y">{Array.isArray(categories) && categories.map((cat: any, i) => (
+              <div key={`${typeof cat === 'string' ? cat : cat.id}-${i}`} className="flex justify-between items-center px-2 py-1.5">
+                <span className="text-xs font-black text-black">{typeof cat === 'string' ? cat : cat.name}</span>
+                {(typeof cat === 'string' ? cat : cat.id) !== 'Otro' && (
+                  <button onClick={() => deleteCategory(typeof cat === 'string' ? {id: cat, name: cat} : cat)} className="text-red-500 hover:text-red-700"><Trash2 size={12} /></button>
+                )}
+              </div>
+            ))}</div>
+            <p className="text-[8px] text-black font-black mt-2 text-center">* La categoría "Otro" no se puede eliminar</p>
+          </div>
+        </DialogContent>
+      </Dialog>
+      
+      <Dialog open={showDepartmentModal} onOpenChange={setShowDepartmentModal}>
+        <DialogContent className="bg-white max-w-md p-0 rounded-xl">
+          <DialogHeader className="bg-[#1A2C4E] p-3 text-white rounded-t-xl"><DialogTitle className="text-xs font-black">📁 Gestionar Departamentos</DialogTitle></DialogHeader>
+          <div className="p-3">
+            <div className="flex gap-2 mb-3"><Input placeholder="Nuevo departamento..." value={newDepartment} onChange={(e) => setNewDepartment(e.target.value)} className="flex-1 h-7 text-xs font-black text-black" onKeyPress={(e) => e.key === 'Enter' && addDepartment()} /><Button onClick={addDepartment} className="bg-primary text-black h-7 text-xs px-3 font-black">AGREGAR</Button></div>
+            <div className="max-h-52 overflow-y-auto border rounded-lg divide-y">{Array.isArray(departments) && departments.map((dept, i) => (<div key={`${dept}-${i}`} className="flex justify-between items-center px-2 py-1.5"><span className="text-xs font-black text-black">{dept}</span>{dept !== 'Otros' && (<button onClick={() => deleteDepartment(dept)} className="text-red-500 hover:text-red-700"><Trash2 size={12} /></button>)}</div>))}</div>
+            <p className="text-[8px] text-black font-black mt-2 text-center">* El departamento "Otros" no se puede eliminar</p>
+          </div>
+        </DialogContent>
+      </Dialog>
+      
+      <Dialog open={showGlobalIvaModal} onOpenChange={setShowGlobalIvaModal}>
+        <DialogContent className="bg-white max-w-md p-0 rounded-xl">
+          <DialogHeader className="bg-[#1A2C4E] p-3 text-white rounded-t-xl"><DialogTitle className="text-sm font-black">Ajuste de IVA Global</DialogTitle></DialogHeader>
+          <div className="p-4 space-y-4">
+            <div><label className="text-[10px] font-black uppercase text-black block mb-1">Nuevo porcentaje de IVA (%)</label><Input type="number" step="0.1" value={newGlobalIva} onChange={(e) => setNewGlobalIva(Number(e.target.value))} className="font-black text-black" /></div>
+            <div className="bg-amber-50 p-2 rounded-lg border border-amber-200"><p className="text-[9px] text-amber-700 flex items-center gap-1 font-black"><AlertTriangle size={10} /> Esta acción actualizará TODOS los productos marcados como "Con I.V.A.".</p><p className="text-[8px] text-amber-600 mt-1 font-black">Solo se puede realizar si la caja está cerrada.</p></div>
+            <div className="flex justify-end gap-2"><Button variant="ghost" onClick={() => setShowGlobalIvaModal(false)} className="font-black text-black">CANCELAR</Button><Button onClick={applyGlobalIva} className="bg-primary text-black font-black">APLICAR CAMBIO</Button></div>
+          </div>
+        </DialogContent>
+      </Dialog>
+      
+      <ProductFormModal
+        open={isAdding}
+        onClose={handleCloseModal}
+        editingProduct={editingProduct}
+        onSave={handleProductSave}
+        exchangeRate={state.exchangeRate}
+        products={products}
+        categories={categories.map((c: any) => typeof c === 'string' ? c : c.id)}
+        departments={departments}
+      />
+    </div>
+  );
+}

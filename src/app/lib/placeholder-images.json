@@ -1,0 +1,10 @@
+{
+  "placeholderImages": [
+    {
+      "id": "masterpos-logo",
+      "description": "Logo de MasterPos Pro Evolución v1.0",
+      "imageUrl": "/logo-master.png",
+      "imageHint": "liquor logo"
+    }
+  ]
+}

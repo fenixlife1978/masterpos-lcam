@@ -1,0 +1,86 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Gris Neutral extraído de la imagen del logo */
+    --background: 0 0% 85%; /* #D9D9D9 - Gris profesional */
+    --foreground: 222 47% 11%;
+    
+    --card: 0 0% 88%;
+    --card-foreground: 222 47% 11%;
+    
+    --popover: 0 0% 85%;
+    --popover-foreground: 222 47% 11%;
+    
+    --primary: 43 73% 48%; /* Dorado Mostaza */
+    --primary-foreground: 0 0% 0%;
+    
+    --secondary: 218 70% 13%; /* Azul Marino Profundo */
+    --secondary-foreground: 0 0% 100%;
+    
+    --muted: 0 0% 75%;
+    --muted-foreground: 222 10% 40%;
+    
+    --accent: 43 73% 48%;
+    --accent-foreground: 0 0% 0%;
+    
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 20% 98%;
+
+    --border: 0 0% 15%;    /* Negro visible (corregido) */
+    --input: 0 0% 15%;     /* Inputs con borde negro (corregido) */
+    --ring: 43 73% 48%;
+    --radius: 12px;
+
+    --success: 145 100% 45%;
+    --warning: 38 100% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-body antialiased selection:bg-primary selection:text-primary-foreground overflow-hidden;
+  }
+}
+
+@keyframes float-ambient {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(25px, -18px) scale(1.05); }
+  66% { transform: translate(-18px, 25px) scale(.95); }
+}
+
+@keyframes pulse-scan {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+.animate-float-ambient {
+  animation: float-ambient 8s ease-in-out infinite;
+}
+
+.animate-pulse-scan {
+  animation: pulse-scan 2s infinite;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 5px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  @apply bg-muted/20;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  @apply bg-primary rounded-full;
+}
+
+.gold-glow {
+  box-shadow: 0 0 15px rgba(213, 160, 33, 0.2);
+}
+
+.gold-gradient {
+  background: linear-gradient(135deg, #d5a021, #b88a1c);
+}

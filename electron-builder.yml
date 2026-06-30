@@ -1,0 +1,35 @@
+appId: com.masterpos.app
+productName: MasterPOS
+copyright: Copyright © 2025 MasterPOS
+directories:
+  output: dist-electron
+  buildResources: build
+
+files:
+  - electron/**/*
+  - out/**/*
+  - public/**/*
+  - node_modules/**/*
+  - package.json
+
+win:
+  target:
+    - nsis
+  icon: public/logo-master.png
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: MasterPOS
+
+linux:
+  target:
+    - AppImage
+  icon: public/logo-master.png
+
+mac:
+  target:
+    - dmg
+  icon: public/logo-master.png
